@@ -180,14 +180,14 @@ class QualityAuditorAgent:
         from app_3.local_llm import LocalGenerator
         self.client = LocalGenerator()
         
-    def generate_evaluation(self, source_passage: str, rubric_text: str, nli_score: float) -> str:
+    def generate_evaluation(self, source_passage: str, rubric_text: str, nli_score: float, temp: float = 0.6) -> str:
         if nli_score > 0.6:
             prompt = f"The source documentation logically entails the rubric requirement '{rubric_text}'. In one short sentence, validate that the documentation provides rigorous evidence for this standard."
         else:
             prompt = f"The source documentation fails to entail the rubric requirement '{rubric_text}'. In one short sentence, warn that the documentation lacks the required rigour."
         
         try:
-            return self.client.generate(prompt=prompt, temperature=0.6, max_new_tokens=60).strip()
+            return self.client.generate(prompt=prompt, temperature=temp, max_new_tokens=60).strip()
         except:
             return "The documentation aligns with the rubric."
 
@@ -242,23 +242,15 @@ def run_adversarial_simulation(epistemic_map: EpistemicMap, max_turns: int = 10)
         print(f"Assessor Agent:\n{textwrap.indent(wrapped_q, '  ')}")
         print("-" * 80)
         
-        # Generate defense from high-temp AI student - Monte Carlo Variance Sampling (3 runs)
-        print("   [Sampling 3 alternate responses for Variance calculation...]")
-        mc_responses = []
-        for i in range(3):
-            # The generate_response call from the original architecture
-            resp, pivot_dim = ai_student.generate_response(
-                claim_id=active_claim.id,
-                claim_text=active_claim.text,
-                source_passage=active_claim.source_passage,
-                current_dimension=active_claim.dimension,
-                question=question,
-                depth=current_depth
-            )
-            mc_responses.append(resp)
-            
-        # We select the first response as the canonical one for the dialogue
-        response = mc_responses[0]
+        # Generate defense from high-temp AI student
+        response, pivot_dim = ai_student.generate_response(
+            claim_id=active_claim.id,
+            claim_text=active_claim.text,
+            source_passage=active_claim.source_passage,
+            current_dimension=active_claim.dimension,
+            question=question,
+            depth=current_depth
+        )
         
         # Simulate typing/thinking delay
         time.sleep(1.0)
@@ -274,13 +266,16 @@ def run_adversarial_simulation(epistemic_map: EpistemicMap, max_turns: int = 10)
         rubric_text = "The student must demonstrate critical thinking and logical consistency."
         assessor_nli = nli_auditor.compute_entailment(rubric_text, question)
         
+        # 2. Evaluator NLI: Question vs Answer
+        evaluator_nli = nli_auditor.compute_entailment(question, response)
+        
         # 3. Quality Auditor MC Sampling (Variance based on Auditor NLI: Evaluation vs Rubric)
-        audit_agent = QualityAuditorAgent()
+        print("   [Sampling 3 Quality Auditor evaluations (Bracketed Temp Sweep) for Variance calculation...]")
         base_auditor_nli = nli_auditor.compute_entailment(active_claim.source_passage, rubric_text)
         
         mc_auditor_nli_scores = []
-        for i in range(3):
-            audit_resp = audit_agent.generate_evaluation(active_claim.source_passage, rubric_text, base_auditor_nli)
+        for t in [0.3, 0.7, 1.0]:
+            audit_resp = audit_agent.generate_evaluation(active_claim.source_passage, rubric_text, base_auditor_nli, temp=t)
             # Measure variance in how consistently the Auditor evaluates the document against the rubric
             score = nli_auditor.compute_entailment(audit_resp, rubric_text)
             mc_auditor_nli_scores.append(score)
@@ -290,10 +285,9 @@ def run_adversarial_simulation(epistemic_map: EpistemicMap, max_turns: int = 10)
         # Calculate Variance as the standard deviation of the 3 sampled Quality Auditor NLI scores
         import numpy as np
         variance = float(np.std(mc_auditor_nli_scores))
-        auditor_nli = base_auditor_nli
         
         # 4. Quality Auditor NLI: Documentation vs Rubric
-        auditor_nli = nli_auditor.compute_entailment(active_claim.source_passage, rubric_text)
+        auditor_nli = base_auditor_nli
         
         # Generate Evaluator and Auditor vocalizations
         eval_text = eval_agent.generate_evaluation(question, response, evaluator_nli)
@@ -347,7 +341,8 @@ def run_adversarial_simulation(epistemic_map: EpistemicMap, max_turns: int = 10)
             
         composite = 1.0 / (1.0 + np.exp(-z))
         
-        print(f"   Variance (Monte Carlo StdDev):             {variance:.2f} (from scores: {mc_nli_scores})")
+        formatted_scores = [f"{s:.2f}" for s in mc_auditor_nli_scores]
+        print(f"   Variance (Monte Carlo StdDev):             {variance:.2f} (from scores: {formatted_scores})")
         print(f"   Composite Score:                           {composite:.2f}")
         
         if composite < 0.4:
