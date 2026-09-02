@@ -12,3 +12,4 @@ sentencepiece>=0.1.99
 accelerate>=0.26.0
 gplearn>=0.4.2
 sympy>=1.12
+sentence-transformers>=2.2.0
