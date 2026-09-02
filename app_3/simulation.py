@@ -67,7 +67,12 @@ class AdvocateAgent:
     def generate_response(self, claim_id: str, claim_text: str, source_passage: str,
                           current_dimension: PapanekDimension, question: str, depth: int,
                           advocate_temp: Optional[float] = None) -> Tuple[str, PapanekDimension]:
-        """Generates a high-temperature student advocate argument, pivoting to Papanek dimensions."""
+        """Generates high-temperature rough brainstorming suggestions (intentionally imperfect).
+
+        Uses very high temperature to encourage diverse, varied, uncertain responses that show
+        reasoning exploration rather than polished answers. This makes the AI scaffolding role
+        explicit and ensures high variance across samples.
+        """
         # Find adjacent dimensions to pivot to
         from app_3.reconstruction import ReconstructionRouter
         from app_3.teleprompter import Teleprompter
@@ -86,29 +91,37 @@ class AdvocateAgent:
         current_dim_label = mask_map.get(current_dimension, current_dimension.value)
         pivot_dim_label = mask_map.get(pivot_dimension, pivot_dimension.value)
 
-        # Use Claude at high temperature if client is active
+        # Use Claude at VERY high temperature if client is active
+        # High temperature encourages rough, varied brainstorming (not polished answers)
         if self.client is not None:
             prompt = f"""
-You are the "Advocate Agent", suggesting alternative angles to help a design engineering candidate defend their coursework rationale in an oral viva assessment.
+You are a thinking partner helping a student brainstorm and explore ideas.
+IMPORTANT: Be rough, uncertain, and show your thinking process. This is brainstorming, NOT final answers.
 
 Context:
-- Original Claim being defended: "{claim_text}"
-- Submitted passage context: "{source_passage}"
-- Assessor's Socratic question: "{question}"
-- Current reasoning angle: {current_dim_label}
-- Probing depth: {depth}
+- Claim to explore: "{claim_text}"
+- Original work: "{source_passage}"
+- Question being probed: "{question}"
+- Angle to explore: {current_dim_label}
+- Depth: {depth}
 
-Suggest 2-3 quick talking points the student could consider:
-1. Ground in the original passage, but keep suggestions brief and punchy.
-2. Include one angle via '{pivot_dim_label}'.
-3. Use simple language - as a student might speak, not academic jargon.
-4. Format as a bullet-point list only. No asterisks, stage directions, or markdown.
-5. Each bullet should be ONE SHORT SENTENCE ONLY (max 15 words per bullet).
+Generate 2-3 rough talking points (different phrasing each time):
+1. Show your uncertainty - use "maybe", "could be", "what if", "I'm not sure but..."
+2. Try different angles, even if they seem contradictory
+3. Don't polish or make perfect - show rough thinking
+4. Be conversational, like a student thinking aloud
+5. Keep each point to ONE SHORT SENTENCE (max 15 words)
+6. No markdown, asterisks, or stage directions - just natural text
+
+Remember: Your job is to help the student explore ideas, not to provide polished answers.
 """
             try:
+                # Use VERY high temperature for diverse, varied outputs
+                high_temp = 1.8  # Force exploration over consistency
+
                 defense_text = self.client.generate(
                     prompt=prompt,
-                    temperature=_clamp_temp(advocate_temp if advocate_temp is not None else ADVOCATE_TEMP),
+                    temperature=_clamp_temp(high_temp),
                     max_new_tokens=200
                 )
                 defense_text = _strip_stage_directions(defense_text)

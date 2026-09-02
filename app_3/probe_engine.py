@@ -42,7 +42,12 @@ class ProbingSessionManager:
         self.rubric_scores = []
         self.challenges: List[ChallengeRecord] = []
         from app_3.config import SCORING_VERSION
-        self.weight_version = SCORING_VERSION        
+        self.weight_version = SCORING_VERSION
+
+        # Evidence accumulation for grounding/variance
+        self.accumulated_responses: List[str] = []  # Student responses so far
+        self.rubric_text = "The student must demonstrate critical thinking and logical consistency."
+
         # Select first target (most vulnerable ranked claim)
         self._select_next_vulnerable_claim()
 
@@ -87,62 +92,49 @@ class ProbingSessionManager:
         nli_auditor = NLIAuditor()
         ai_student = AdvocateAgent()
         
-        # 1. Evaluator NLI: Question vs Answer
-        evaluator_nli = nli_auditor.compute_entailment(question, response)
-        
-        # 2. Quality Auditor NLI: Documentation vs Rubric
-        rubric_text = "The student must demonstrate critical thinking and logical consistency."
-        auditor_nli = nli_auditor.compute_entailment(self.active_claim.source_passage, rubric_text)
-        
-        # 3. Quality Auditor MC Sampling (Variance based on Auditor NLI: Evaluation vs Rubric)
+        # 1. Coherence: Question vs Student Response (single score)
+        coherence = nli_auditor.compute_entailment(question, response)
+
+        # 2. Accumulate responses for evidence portfolio
+        if response and response.strip():
+            self.accumulated_responses.append(response)
+
+        # 3. Build combined evidence: documentation + epistemic map + accumulated responses
+        epistemic_dict = self.epistemic_map.model_dump() if hasattr(self.epistemic_map, 'model_dump') else None
+        combined_evidence = self.feature_engine.format_combined_evidence(
+            documentation=self.active_claim.source_passage,
+            epistemic_map=epistemic_dict,
+            responses=self.accumulated_responses
+        )
+
+        # 4. Grounding & Variance: MC sampling on combined evidence against rubric
+        # Variance measures stability of evidence portfolio across multiple evaluations
+        mc_grounding_scores = []
         quality_auditor = QualityAuditorAgent()
-        
-        mc_auditor_nli_scores = []
+
         for i in range(3):
-            audit_resp = quality_auditor.generate_evaluation(self.active_claim.source_passage, rubric_text, auditor_nli)
-            # Measure variance in how consistently the Auditor evaluates the document against the rubric
-            score = nli_auditor.compute_entailment(audit_resp, rubric_text)
-            mc_auditor_nli_scores.append(score)
-            
-        variance = float(np.std(mc_auditor_nli_scores))
-        advocate_nli = nli_auditor.compute_entailment(self.active_claim.source_passage, response)
+            # Generate evaluation of combined evidence against rubric
+            audit_resp = quality_auditor.generate_evaluation(combined_evidence, self.rubric_text, 0.5 + i * 0.1)
+            # Score: does this evaluation confirm the evidence grounds in rubric?
+            score = nli_auditor.compute_entailment(audit_resp, self.rubric_text)
+            mc_grounding_scores.append(score)
+
+        # Grounding = mean of MC samples
+        grounding = float(np.mean(mc_grounding_scores))
+        # Variance = std_dev across samples (stability of evidence portfolio)
+        variance = float(np.std(mc_grounding_scores))
         
-        # 4. Assessor NLI: Rubric vs Question
-        assessor_nli = nli_auditor.compute_entailment(rubric_text, question)
-        
-        # Composite calculation from the Symbolic Regression equation
-        from app_3.config import SCORING_WEIGHTS_FILE
-        import json
-        
-        try:
-            if SCORING_WEIGHTS_FILE.exists():
-                with open(SCORING_WEIGHTS_FILE, 'r') as f:
-                    config = json.load(f)
-                if config.get("version") == "Symbolic_GP":
-                    eq = config.get("equation_simplified")
-                    # Replace variables safely
-                    eq = eq.replace("X0", str(evaluator_nli))
-                    eq = eq.replace("X1", str(auditor_nli))
-                    eq = eq.replace("X2", str(variance))
-                    import sympy
-                    # Evaluate the simplified equation
-                    z = float(sympy.sympify(eq))
-                else:
-                    z = (0.5 + (2.0 * evaluator_nli) + (1.5 * auditor_nli) + (-2.0 * variance))
-            else:
-                z = (0.5 + (2.0 * evaluator_nli) + (1.5 * auditor_nli) + (-2.0 * variance))
-        except Exception as e:
-            print(f"Failed to load GP equation, using fallback: {e}")
-            z = (0.5 + (2.0 * evaluator_nli) + (1.5 * auditor_nli) + (-2.0 * variance))
-            
-        composite_confidence = float(1.0 / (1.0 + np.exp(-z)))
-        
+        # 5. Composite score using simplified model (coherence + grounding - variance penalty)
+        # Version A: Hand-set weights
+        composite_z = 0.5 + (2.0 * coherence) + (2.5 * grounding) + (-2.0 * variance)
+        composite_confidence = float(1.0 / (1.0 + np.exp(-composite_z)))
+
         features = {
-            "coherence_score": evaluator_nli,
-            "grounding_score": advocate_nli,
+            "coherence_score": coherence,
+            "grounding_score": grounding,
             "variance_score": variance,
-            "circularity_score": auditor_nli,
             "composite_confidence": composite_confidence,
+            "accumulated_responses_count": len(self.accumulated_responses),
             "word_count": len(response.split()),
             "is_vague": False
         }
