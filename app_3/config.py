@@ -43,7 +43,7 @@ MAX_CLAIMS_TO_PROBE = int(os.getenv("VIVA_MAX_CLAIMS_TO_PROBE", "5"))  # Limit t
 # wrapper.py, have been rescaled into Claude's range - see wrapper.py's
 # start_session() for the rescaled ranges.
 ASSESSOR_TEMP = float(os.getenv("ASSESSOR_TEMP", "0.1"))     # Extreme Low: Assessor is highly deterministic and strict
-ADVOCATE_TEMP = float(os.getenv("ADVOCATE_TEMP", "0.95"))    # Extreme High: Advocate uses max temperature for wild lateral thinking (was 2.0 under Gemini's wider range)
+ADVOCATE_TEMP = float(os.getenv("ADVOCATE_TEMP", "0.5"))     # Moderated: High temp destroys tiny 0.5B models; lowered to 0.5 so it stays relevant
 EVALUATOR_TEMP = float(os.getenv("EVALUATOR_TEMP", "1.0"))   # High: Evaluator sits in the middle but is highly stochastic
 
 # Feedback-Independent Thresholds

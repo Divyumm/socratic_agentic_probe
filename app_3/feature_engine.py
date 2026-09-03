@@ -4,14 +4,58 @@ from typing import Dict, Any, Optional
 class FeatureEngine:
     """Computes field-knowledge-independent reasoning features from student responses."""
 
+    def format_combined_evidence(self, documentation: str, epistemic_map: Optional[dict] = None,
+                                responses: Optional[list] = None) -> str:
+        """
+        Combines documentation, epistemic map (JSON claims), and accumulated responses
+        into a single evidence portfolio for grounding evaluation.
+
+        Args:
+            documentation: Original student submission text
+            epistemic_map: Dict with 'claims' list (from EpistemicMap)
+            responses: List of student responses accumulated so far
+
+        Returns:
+            Formatted evidence text combining all components
+        """
+        evidence_parts = []
+
+        # Original documentation
+        if documentation:
+            evidence_parts.append(f"ORIGINAL SUBMISSION:\n{documentation}\n")
+
+        # Epistemic map claims
+        if epistemic_map and isinstance(epistemic_map, dict):
+            claims = epistemic_map.get("claims", [])
+            if claims:
+                evidence_parts.append("KEY CLAIMS EXTRACTED:")
+                for i, claim in enumerate(claims, 1):
+                    if isinstance(claim, dict):
+                        claim_text = claim.get("text", claim.get("claim_text", str(claim)))
+                    else:
+                        claim_text = str(claim)
+                    evidence_parts.append(f"  {i}. {claim_text}")
+                evidence_parts.append("")
+
+        # Accumulated responses from probing session
+        if responses:
+            evidence_parts.append("STUDENT RESPONSES TO PROBING:")
+            for i, response in enumerate(responses, 1):
+                if response and response.strip():
+                    evidence_parts.append(f"  Q{i}: {response}")
+            evidence_parts.append("")
+
+        combined = "\n".join(evidence_parts)
+        return combined if combined.strip() else documentation
+
     def __init__(self):
-        # Learned single-neuron classifier weights (logistic regression)
-        # Incorporates Grounding (Fact-check), Coherence, Variance, and Circularity
+        # Simplified scoring: Coherence, Grounding, Variance (Option C)
+        # Removed: Circularity (now redundant with STS similarity)
+        # Hybrid NLI + STS approach handles semantic alignment more comprehensively
         self.w_bias = 0.5
         self.w_coherence = 2.0
         self.w_grounding = 2.5
         self.w_variance = -2.0
-        self.w_circularity = -1.5
 
         from app_3.config import MOCK_MODE
         from app_3.llm_client import LLMClient
@@ -63,21 +107,22 @@ class FeatureEngine:
 
     def compute_grounding_score(self, response: str, claim_text: Optional[str]) -> float:
         """
-        Calculates grounding using the on-device NLI model.
-        Returns the entailment probability between the claim (evidence) and the response.
+        Calculates grounding using hybrid NLI + STS scoring.
+        Returns a continuous score [0, 1] representing how well the response grounds in the evidence.
         """
-        response_norm = response.strip().lower().replace("'", "").replace("’", "")
+        response_norm = response.strip().lower().replace("’", "").replace("’", "")
         if "dont know" in response_norm or "dont" in response_norm or len(response_norm.split()) < 4:
             return 0.0
-            
+
         if not claim_text:
-            return 0.80 # Default/high baseline if no claim context is provided
-            
+            return 0.80  # Default/high baseline if no claim context is provided
+
         try:
             from app_3.nli_auditor import NLIAuditor
             auditor = NLIAuditor()
-            # We treat the original claim context as the Evidence, and the student's new response as the Claim to verify
-            score = auditor.compute_grounding(evidence=claim_text, claim=response)
+            # Compute hybrid score: how well does the response ground in the evidence?
+            # Premise: evidence/claim_text, Hypothesis: student response
+            score = auditor.compute_entailment(claim_text, response)
             return score
         except Exception as e:
             print(f"[FeatureEngine] NLI Auditor failed: {e}. Falling back to default.")
@@ -92,55 +137,59 @@ class FeatureEngine:
         else:
             return round(0.20 + (0.15 * math.sin(word_count)), 2)
 
-    def compute_composite_confidence(self, coherence: float, grounding: float, variance: float, circularity: float,
+    def compute_composite_confidence(self, coherence: float, grounding: float, variance: float,
                                      w_bias: Optional[float] = None,
                                      w_coherence: Optional[float] = None,
                                      w_grounding: Optional[float] = None,
-                                     w_variance: Optional[float] = None,
-                                     w_circularity: Optional[float] = None) -> float:
-        """Implements the single-neuron logistic learned classifier or loads Version B multiclass."""
+                                     w_variance: Optional[float] = None) -> float:
+        """
+        Simplified scoring using three core signals (Option C):
+        - Coherence: Semantic alignment to question (hybrid NLI+STS)
+        - Grounding: Evidence grounding in student's document (hybrid NLI+STS)
+        - Variance: Consistency of reasoning (Monte Carlo sampling)
+
+        Removed: Circularity (redundant with STS similarity approach)
+        """
         from app_3.config import SCORING_VERSION, load_scoring_config
-        
+
         if SCORING_VERSION == "B":
             config = load_scoring_config()
             weights = config.get("version_b_weights")
             intercepts = config.get("version_b_intercepts")
             classes = config.get("version_b_classes")
-            
+
             if weights and intercepts and classes:
                 # We have a trained Multiclass Logistic Regression model
-                features = [coherence, grounding, variance, circularity]
-                
+                features = [coherence, grounding, variance]
+
                 # Multiclass Logistic Regression: z = weights @ features + intercepts
                 z_scores = []
                 for i in range(len(classes)):
-                    z = intercepts[i] + sum(weights[i][j] * features[j] for j in range(4))
+                    z = intercepts[i] + sum(weights[i][j] * features[j] for j in range(3))
                     z_scores.append(z)
-                    
+
                 # Softmax
                 max_z = max(z_scores)
                 exp_z = [math.exp(z - max_z) for z in z_scores]
                 sum_exp_z = sum(exp_z)
                 probs = [ez / sum_exp_z for ez in exp_z]
-                
+
                 # Find probability of "Grounded"
                 if "Grounded" in classes:
                     grounded_idx = classes.index("Grounded")
                     return round(probs[grounded_idx], 2)
-                    
-        # Fallback to Version A (Heuristics)
+
+        # Fallback to Version A (Simplified Heuristics)
         bias = w_bias if w_bias is not None else self.w_bias
         coherence_w = w_coherence if w_coherence is not None else self.w_coherence
         grounding_w = w_grounding if w_grounding is not None else self.w_grounding
         variance_w = w_variance if w_variance is not None else self.w_variance
-        circularity_w = w_circularity if w_circularity is not None else self.w_circularity
 
-        z = (bias + 
-             (coherence_w * coherence) + 
-             (grounding_w * grounding) + 
-             (variance_w * variance) + 
-             (circularity_w * circularity))
-        
+        z = (bias +
+             (coherence_w * coherence) +
+             (grounding_w * grounding) +
+             (variance_w * variance))
+
         sigmoid = 1.0 / (1.0 + math.exp(-z))
         return round(sigmoid, 2)
 
@@ -149,7 +198,6 @@ class FeatureEngine:
                           w_coherence: Optional[float] = None,
                           w_grounding: Optional[float] = None,
                           w_variance: Optional[float] = None,
-                          w_circularity: Optional[float] = None,
                           collapse_limit: Optional[float] = None,
                           unstable_limit: Optional[float] = None,
                           evaluator_temp: Optional[float] = None,
@@ -173,7 +221,6 @@ class FeatureEngine:
                 "coherence_score": 0.1,
                 "grounding_score": 0.0,
                 "variance_score": 0.5,
-                "circularity_score": 0.0,
                 "composite_confidence": 0.15,
                 "is_vague": True,
                 "word_count": word_count
@@ -185,7 +232,6 @@ class FeatureEngine:
         coherence_w = w_coherence if w_coherence is not None else self.w_coherence
         grounding_w = w_grounding if w_grounding is not None else self.w_grounding
         variance_w = w_variance if w_variance is not None else self.w_variance
-        circularity_w = w_circularity if w_circularity is not None else self.w_circularity
 
         if not self.mock_mode and self.llm_client.client is not None:
             # Delegate to live LLMClient intermediate-temp evaluation
@@ -195,42 +241,41 @@ class FeatureEngine:
                 w_coherence=coherence_w,
                 w_grounding=grounding_w,
                 w_variance=variance_w,
-                w_circularity=circularity_w,
                 collapse_limit=collapse_limit,
                 unstable_limit=unstable_limit,
                 evaluator_temp=evaluator_temp
             )
+            coherence = eval_data.get("coherence_score", 0.5)
+            grounding = eval_data.get("grounding_score", 0.5)
+            variance = eval_data.get("variance_score", 0.5)
+            composite = eval_data.get("composite_confidence", 0.5)
             features_dict = {
-                "coherence_score": eval_data["coherence_score"],
-                "grounding_score": eval_data["grounding_score"],
-                "variance_score": eval_data["variance_score"],
-                "circularity_score": eval_data["circularity_score"],
-                "composite_confidence": eval_data["composite_confidence"],
+                "coherence_score": coherence,
+                "grounding_score": grounding,
+                "variance_score": variance,
+                "composite_confidence": composite,
                 "is_vague": is_vague,
                 "word_count": word_count
             }
         else:
-            circularity = self.compute_circularity(question, response)
             grounding = self.compute_grounding_score(response, claim_text)
             coherence = self.compute_coherence(question, response)
             if grounding <= 0.05:
                 coherence = 0.05
             variance = self.compute_variance(word_count, is_vague)
-            
+
             composite = self.compute_composite_confidence(
-                coherence, grounding, variance, circularity,
+                coherence, grounding, variance,
                 w_bias=bias,
                 w_coherence=coherence_w,
                 w_grounding=grounding_w,
-                w_variance=variance_w,
-                w_circularity=circularity_w
+                w_variance=variance_w
             )
-            
+
             features_dict = {
                 "coherence_score": coherence,
                 "grounding_score": grounding,
                 "variance_score": variance,
-                "circularity_score": circularity,
                 "composite_confidence": composite,
                 "is_vague": is_vague,
                 "word_count": word_count,

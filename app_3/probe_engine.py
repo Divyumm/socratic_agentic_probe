@@ -92,8 +92,9 @@ class ProbingSessionManager:
         nli_auditor = NLIAuditor()
         ai_student = AdvocateAgent()
         
-        # 1. Coherence: Question vs Student Response (single score)
-        coherence = nli_auditor.compute_entailment(question, response)
+        # 1. Coherence: Question vs Student Response (separate NLI & STS)
+        coherence_nli = nli_auditor._compute_nli_non_contradiction(question, response)
+        coherence_sts = nli_auditor.compute_sts_similarity(question, response)
 
         # 2. Accumulate responses for evidence portfolio
         if response and response.strip():
@@ -107,58 +108,67 @@ class ProbingSessionManager:
             responses=self.accumulated_responses
         )
 
-        # 4. Grounding & Variance: MC sampling on combined evidence against rubric
-        # Variance measures stability of evidence portfolio across multiple evaluations
-        mc_grounding_scores = []
+        # 4. Grounding & Variance: MC sampling on combined evidence against rubric (separate NLI & STS)
+        mc_grounding_nli = []
+        mc_grounding_sts = []
         quality_auditor = QualityAuditorAgent()
 
         for i in range(3):
             # Generate evaluation of combined evidence against rubric
             audit_resp = quality_auditor.generate_evaluation(combined_evidence, self.rubric_text, 0.5 + i * 0.1)
-            # Score: does this evaluation confirm the evidence grounds in rubric?
-            score = nli_auditor.compute_entailment(audit_resp, self.rubric_text)
-            mc_grounding_scores.append(score)
+            # Score components: NLI and STS
+            nli_score = nli_auditor._compute_nli_non_contradiction(audit_resp, self.rubric_text)
+            sts_score = nli_auditor.compute_sts_similarity(audit_resp, self.rubric_text)
+            mc_grounding_nli.append(nli_score)
+            mc_grounding_sts.append(sts_score)
 
         # Grounding = mean of MC samples
-        grounding = float(np.mean(mc_grounding_scores))
+        grounding_nli = float(np.mean(mc_grounding_nli))
+        grounding_sts = float(np.mean(mc_grounding_sts))
         # Variance = std_dev across samples (stability of evidence portfolio)
-        variance = float(np.std(mc_grounding_scores))
-        
-        # 5. Composite score using simplified model (coherence + grounding - variance penalty)
-        # Version A: Hand-set weights
-        composite_z = 0.5 + (2.0 * coherence) + (2.5 * grounding) + (-2.0 * variance)
-        composite_confidence = float(1.0 / (1.0 + np.exp(-composite_z)))
+        variance_nli = float(np.std(mc_grounding_nli))
+        variance_sts = float(np.std(mc_grounding_sts))
+
+        # 5. Composite score: Hand-tuned logistic on 6 variables
+        # Weights (tune as needed based on observation):
+        z = (0.5 +
+             1.8 * coherence_nli + 1.5 * coherence_sts +
+             2.2 * grounding_nli + 2.0 * grounding_sts +
+             -1.8 * variance_nli + -1.5 * variance_sts)
+        composite_confidence = float(1.0 / (1.0 + np.exp(-z)))
 
         features = {
-            "coherence_score": coherence,
-            "grounding_score": grounding,
-            "variance_score": variance,
+            "coherence_nli": coherence_nli,
+            "coherence_sts": coherence_sts,
+            "grounding_nli": grounding_nli,
+            "grounding_sts": grounding_sts,
+            "variance_nli": variance_nli,
+            "variance_sts": variance_sts,
             "composite_confidence": composite_confidence,
             "accumulated_responses_count": len(self.accumulated_responses),
             "word_count": len(response.split()),
             "is_vague": False
         }
-        
-        # Process and map claim_id for Layer 2 rubric scores
-        if "rubric_scores" in features and features["rubric_scores"]:
-            for r_score in features["rubric_scores"]:
-                r_score.claim_id = current_claim_id
-                self.rubric_scores.append(r_score)
                 
+        # Average NLI and STS scores for Turn object storage
+        coherence_avg = (coherence_nli + coherence_sts) / 2.0
+        grounding_avg = (grounding_nli + grounding_sts) / 2.0
+        variance_avg = (variance_nli + variance_sts) / 2.0
+
         if composite_confidence < 0.4:
             state = StudentState.COLLAPSED
         elif composite_confidence < 0.65:
             state = StudentState.UNSTABLE
         else:
             state = StudentState.GROUNDED
-        
+
         # Keep track of dimension history
         self.probed_dimension_history.append(self.active_claim.dimension)
 
         # Handle collapse and routing
         next_prompt = ""
         routed_dimension = None
-        
+
         if state == StudentState.COLLAPSED:
             # Reasoning collapse! Trigger Victor Papanek reconstruction routing
             routed_dimension, reconstruction_prompt = self.reconstruction_router.route_collapse(
@@ -180,7 +190,7 @@ class ProbingSessionManager:
             self.probed_claim_history.append(self.active_claim.id)
             old_claim_text = self.active_claim.text
             self._select_next_vulnerable_claim()
-            
+
             if self.active_claim:
                 # Just ask the next question directly; don't reference the previous answer
                 next_prompt = self.get_current_question()
@@ -192,10 +202,16 @@ class ProbingSessionManager:
             claim_id=current_claim_id,
             question=question,
             student_response=response,
-            coherence_score=features["coherence_score"],
-            grounding_score=features["grounding_score"],
-            variance_score=features["variance_score"],
-            circularity_score=features["circularity_score"],
+            coherence_nli=coherence_nli,
+            coherence_sts=coherence_sts,
+            grounding_nli=grounding_nli,
+            grounding_sts=grounding_sts,
+            variance_nli=variance_nli,
+            variance_sts=variance_sts,
+            coherence_score=coherence_avg,
+            grounding_score=grounding_avg,
+            variance_score=variance_avg,
+            circularity_score=0.0,
             composite_confidence=features["composite_confidence"],
             state=state,
             reconstruction_dimension=routed_dimension,
@@ -280,12 +296,12 @@ class ProbingSessionManager:
         """
         if not self.turns:
             return "No turns have occurred yet. You can only challenge after responding to a probe!"
-            
+
         last_turn = self.turns[-1]
         features = {
             "composite_confidence": last_turn.composite_confidence,
             "variance_score": last_turn.variance_score,
-            "circularity_score": last_turn.circularity_score,
+            "circularity_score": 0.0,
             "coherence_score": last_turn.coherence_score,
             "grounding_score": last_turn.grounding_score,
         }
@@ -343,17 +359,7 @@ class ProbingSessionManager:
             
             if self.weight_version == "B":
                 v_b_composite = round(avg_confidence, 2)
-                import math
-                v_a_sum = 0
-                for t in self.turns:
-                    if t.state != StudentState.PAUSED:
-                        z = (self.feature_engine.w_bias + 
-                             self.feature_engine.w_coherence * t.coherence_score +
-                             self.feature_engine.w_grounding * t.grounding_score +
-                             self.feature_engine.w_variance * t.variance_score +
-                             self.feature_engine.w_circularity * t.circularity_score)
-                        v_a_sum += 1.0 / (1.0 + math.exp(-z))
-                v_a_composite = round(v_a_sum / len(confidences), 2) if confidences else 1.0
+                v_a_composite = round(avg_confidence, 2)
             else:
                 v_a_composite = round(avg_confidence, 2)
 
@@ -375,11 +381,13 @@ class ProbingSessionManager:
             "assessor": {
                 "weight_version": self.weight_version,
                 "weights": {
-                    "w_bias": self.feature_engine.w_bias,
-                    "w_coherence": self.feature_engine.w_coherence,
-                    "w_grounding": self.feature_engine.w_grounding,
-                    "w_variance": self.feature_engine.w_variance,
-                    "w_circularity": self.feature_engine.w_circularity
+                    "coherence_nli": 1.8,
+                    "coherence_sts": 1.5,
+                    "grounding_nli": 2.2,
+                    "grounding_sts": 2.0,
+                    "variance_nli": -1.8,
+                    "variance_sts": -1.5,
+                    "bias": 0.5
                 },
                 "thresholds": {
                     "collapse_limit": self.breakdown_detector.collapse_limit,
@@ -395,7 +403,6 @@ class ProbingSessionManager:
                         "coherence": t.coherence_score,
                         "grounding": t.grounding_score,
                         "variance": t.variance_score,
-                        "circularity": t.circularity_score,
                         "composite_confidence": t.composite_confidence,
                         "classified_state": t.state.value
                     }

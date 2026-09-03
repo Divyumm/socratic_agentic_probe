@@ -373,7 +373,7 @@ else:
 
         # Debug mode toggle
         if "debug_mode" not in st.session_state:
-            st.session_state.debug_mode = False
+            st.session_state.debug_mode = True  # Enable debug mode by default
         st.session_state.debug_mode = st.toggle("🐛 Debug Mode (show scores & badges)", value=st.session_state.debug_mode)
 
         # Pause
@@ -535,13 +535,17 @@ else:
         # STUDENT INPUT & ADVOCATE CO-CREATION HUB
         # ------------------------------------------
         st.subheader("Your Justification Hub")
-        
-        # Advocate Helper Section
+
+        # Advocate Helper Section (one-time only per question)
         if active_claim:
             adv_col1, adv_col2 = st.columns([2, 1])
             with adv_col2:
-                if st.button("Generate Advocate Defense Helper", type="secondary", use_container_width=True):
-                    with st.spinner("Generating defense rationale..."):
+                # Disable button if advocate was already generated for this question
+                advocate_disabled = st.session_state.get("advocate_was_generated", False)
+                button_label = "✓ Advocate Suggestion Ready" if advocate_disabled else "Generate Brainstorming Suggestions"
+
+                if st.button(button_label, type="secondary", use_container_width=True, disabled=advocate_disabled):
+                    with st.spinner("Generating rough brainstorming suggestions..."):
                         suggestion, pivot_dim = VivaWrapper.get_advocate_defense(
                             claim=active_claim,
                             question=st.session_state.next_prompt,
@@ -550,9 +554,10 @@ else:
                         )
                         st.session_state.advocate_suggestion = suggestion
                         st.session_state.advocate_pivot = pivot_dim
-                        st.session_state.advocate_was_generated = True  # Flag that advocate was used
+                        st.session_state.advocate_was_generated = True  # Flag that advocate was used (disables button)
                         st.session_state.response_input = suggestion # Pre-populate student answer box
                         st.session_state.student_resp_key = suggestion # Bind directly to text area key to force refresh
+                        st.rerun()  # Refresh immediately to show disabled button and suggestions
 
             # The advocate suggestion text is pre-populated in the text area below.
             # Student response submission form
@@ -567,55 +572,65 @@ else:
             
             col_b1, col_b2, col_b3 = st.columns([2, 1, 1])
             with col_b1:
-                if st.button("Submit Rationale to Assessor", type="primary", use_container_width=True):
+                # Disable button if response already submitted (wait state)
+                submit_disabled = st.session_state.get("response_submitted_waiting", False)
+
+                if st.button(
+                    "Submit Rationale to Assessor",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=submit_disabled
+                ):
                     if not response_input_text.strip():
-                        st.error("Please enter a response.")
+                        st.error("⚠️ Please enter a response before submitting.")
                     else:
-                        # Submit turn with user's current slider weights
-                        with st.status("Evaluating response...", expanded=True) as status:
-                            status.update(label="🔍 Extracting reasoning features...", state="running")
+                        # Mark as submitted to disable button during processing
+                        st.session_state.response_submitted_waiting = True
+
+                        # Show processing status
+                        with st.status("Processing your response...", expanded=True) as status:
+                            status.update(label="📝 Received your response", state="running")
+
+                            # Compute features and scores (this takes a few seconds)
                             turn, next_prompt = manager.submit_response(
                                 response=response_input_text
                             )
-                            status.update(label="✅ Response evaluated", state="complete")
+
+                            status.update(label="✅ Response fully evaluated", state="complete")
 
                         # Detect response source based on whether advocate was generated
                         if st.session_state.advocate_was_generated:
-                            # Advocate suggestion was generated - check if student edited it
                             similarity = SequenceMatcher(None, response_input_text.lower(), st.session_state.advocate_suggestion.lower()).ratio()
                             if similarity >= 0.85:
-                                # Minimal edits - mostly copied advocate suggestion
                                 turn.response_source = ResponseSource.ADVOCATE
                             elif similarity >= 0.50:
-                                # Significant edits but kept structure/content
                                 turn.response_source = ResponseSource.HYBRID
                             else:
-                                # Largely replaced - student rewrote most of it
                                 turn.response_source = ResponseSource.STUDENT
                         else:
-                            # No advocate suggestion was generated, so it's purely student-written
                             turn.response_source = ResponseSource.STUDENT
 
                         st.session_state.last_turn_result = turn
                         st.session_state.next_prompt = next_prompt
 
-                        # Auto-save checkpoint after each turn for recovery
+                        # Auto-save checkpoint after each turn
                         checkpoint_transcript = manager.build_transcript(notes=f"Auto-save checkpoint. Participant ID: {st.session_state.participant_id}")
                         checkpoint_path = BASE_DIR / "data" / "processed" / f"checkpoint_{manager.session_id}.json"
                         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(checkpoint_path, "w", encoding="utf-8") as f:
                             f.write(checkpoint_transcript.model_dump_json(indent=2))
 
-                        # Reset helper variables
+                        # Reset helper variables for next question
                         st.session_state.advocate_suggestion = ""
                         st.session_state.advocate_pivot = None
                         st.session_state.advocate_was_generated = False
                         st.session_state.response_input = ""
                         st.session_state.clear_text_area = True
                         st.session_state.show_challenge = False
+                        st.session_state.response_submitted_waiting = False  # Re-enable button
 
-                        st.success("Rationale evaluated.")
-                        st.rerun()
+                        st.success("✅ Your response has been recorded and evaluated. Loading next question...")
+                        st.rerun()  # Immediately show next question
 
             with col_b2:
                 if st.button("Challenge Score Decision", use_container_width=True, disabled=(not manager.turns)):
@@ -693,33 +708,7 @@ else:
                     <div class="metric-label" style="font-weight: 600;">COMPOSITE CONFIDENCE SCORE</div>
                 </div>
                 """, unsafe_allow_html=True)
-                # Longitudinal Rubric Score display
-                if manager.rubric_scores:
-                    st.markdown("##### Longitudinal Rubric Scores")
-                    # Group by claim_id
-                    claims_scored = set(s.claim_id for s in manager.rubric_scores)
-                    for cid in sorted(claims_scored):
-                        cid_scores = [s for s in manager.rubric_scores if s.claim_id == cid]
-                        score_rows = ""
-                        for s in cid_scores:
-                            score_rows += f"<tr><td style='padding: 4px; border: 1px solid #000000; font-weight: bold;'>{html.escape(s.rubric_construct.value)}</td><td style='padding: 4px; border: 1px solid #000000; text-align: center;'>{html.escape(s.anchor_level)}</td><td style='padding: 4px; border: 1px solid #000000; text-align: center;'>{s.score:.2f}</td></tr>"
 
-                        html_content = f"""<div class="glass-card" style="font-size: 0.9rem; margin-bottom: 12px;">
-<div style="font-weight: bold; margin-bottom: 6px;">Claim {html.escape(cid)} qualitative review:</div>
-<table style="width: 100%; border-collapse: collapse; border: 1px solid #000000; font-family: 'Times New Roman';">
-<thead>
-<tr style="background-color: #f0f0f0;">
-<th style="padding: 4px; border: 1px solid #000000; text-align: left;">Construct</th>
-<th style="padding: 4px; border: 1px solid #000000;">Anchor</th>
-<th style="padding: 4px; border: 1px solid #000000;">Score</th>
-</tr>
-</thead>
-<tbody>
-{score_rows}
-</tbody>
-</table>
-</div>"""
-                        st.markdown(html_content, unsafe_allow_html=True)
 
             else:
                 st.info("Submit your first response to see the real-time reasoning metrics dashboard.")
@@ -729,13 +718,9 @@ else:
         # Display the explanation challenge context
         if st.session_state.show_challenge:
             st.markdown("---")
-            st.markdown(f"""
-            <div class="glass-card" style="border-color: #e9d5ff; background: rgba(88, 28, 135, 0.15);">
-                <h4>Socratic Assessment Challenge Rationale</h4>
-                <p style="font-size: 0.95rem; line-height: 1.4;">{html.escape(st.session_state.challenge_response)}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
+            st.subheader("Challenge This Score")
+            st.write(st.session_state.challenge_response)
+
             challenge_justification = st.text_input(
                 "Optional: explain your reasoning for disputing this score (faculty will see this):",
                 placeholder="My response is grounded because... (leave blank if you'd rather not add anything)"
