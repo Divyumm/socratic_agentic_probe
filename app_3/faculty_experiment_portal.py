@@ -11,16 +11,19 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from app_3.storage import StorageManager
 from app_3.schemas import FacultyExperimentRating
+from app_3.theme import inject_theme
 
 st.set_page_config(page_title="Faculty Experiment Portal", layout="wide")
 
+inject_theme()
+
 st.title("🧪 Faculty Evaluation Portal (Double-Blind)")
-st.markdown("Evaluate the Socratic AI's qualitative performance and provide Ground Truth grades to calibrate the orchestration parameters.")
+st.markdown("Evaluate the system's qualitative performance and provide Ground Truth grades to calibrate the orchestration parameters.")
 
 # Load transcripts
 transcripts = StorageManager.list_available_transcripts()
 if not transcripts:
-    st.info("No session transcripts found. Have students run the viva app first.")
+    st.info("No session transcripts found. Have students run the assessment app first.")
     st.stop()
 
 session_id = st.sidebar.selectbox("Select Student Session", transcripts)
@@ -32,8 +35,6 @@ st.sidebar.markdown(f"**Document:** {transcript.document_name}")
 # Hide the profile name from the faculty!
 if transcript.experiment_profile:
     st.sidebar.success("🔒 Experimental Profile Assigned (Blind)")
-else:
-    st.sidebar.warning("No experimental profile attached to this session.")
 
 faculty_id = st.sidebar.text_input("Your Faculty ID", value="Faculty-1")
 
@@ -75,7 +76,7 @@ for i, turn in enumerate(transcript.turns):
             st.json(existing_rating.model_dump())
         else:
             with st.form(key=f"rating_form_{i}"):
-                st.markdown("#### 1. AI Dialogue Quality")
+                st.markdown("#### 1. Dialogue Quality")
                 assessor_halluc = st.toggle("Assessor Hallucination (Did it hallucinate facts?)", value=False, key=f"h_{i}")
                 assessor_rep = st.toggle("Assessor Repetition (Did it exactly repeat a previous question?)", value=False, key=f"r_{i}")
                 

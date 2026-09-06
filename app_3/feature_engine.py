@@ -5,15 +5,17 @@ class FeatureEngine:
     """Computes field-knowledge-independent reasoning features from student responses."""
 
     def format_combined_evidence(self, documentation: str, epistemic_map: Optional[dict] = None,
-                                responses: Optional[list] = None) -> str:
+                                responses: Optional[list] = None,
+                                dialogue_transcript: Optional[str] = None) -> str:
         """
-        Combines documentation, epistemic map (JSON claims), and accumulated responses
+        Combines documentation, epistemic map (JSON claims), and accumulated dialogue
         into a single evidence portfolio for grounding evaluation.
 
         Args:
             documentation: Original student submission text
             epistemic_map: Dict with 'claims' list (from EpistemicMap)
             responses: List of student responses accumulated so far
+            dialogue_transcript: Formatted string of the conversation so far
 
         Returns:
             Formatted evidence text combining all components
@@ -37,8 +39,12 @@ class FeatureEngine:
                     evidence_parts.append(f"  {i}. {claim_text}")
                 evidence_parts.append("")
 
-        # Accumulated responses from probing session
-        if responses:
+        # Dialogue Transcript
+        if dialogue_transcript:
+            evidence_parts.append("CONVERSATION DIALOGUE:")
+            evidence_parts.append(dialogue_transcript)
+            evidence_parts.append("")
+        elif responses:
             evidence_parts.append("STUDENT RESPONSES TO PROBING:")
             for i, response in enumerate(responses, 1):
                 if response and response.strip():

@@ -58,6 +58,23 @@ python3 -m app_3.train_symbolic_regression
 ```
 This will output the newly generated mathematical equation and automatically integrate it into the `probe_engine.py` logic for future sessions.
 
+### 4. Session Feedback Dashboard
+
+Once a session has been completed, students can view their final grade and rubric breakdown on a dedicated feedback dashboard:
+
+```bash
+python3 -m streamlit run app_3/feedback_app.py
+```
+This dashboard allows users to select their completed session and view a breakdown of their reasoning foundation and rubric criterion scores.
+
+### 5. Training the Calibrated NLI Head
+
+The system now supports an alternative to the cross-encoder using a calibrated 3-class entailment head over frozen sentence embeddings. To train this logistic regression head on the provided data:
+
+```bash
+python3 -m app_3.train_nli_head
+```
+
 ### Important: Parsing New PDFs (API Key Required)
 
 While the Simulation Phase runs entirely locally, the Document Extraction Phase (parsing a raw coursework PDF into an Epistemic Map of claims) still relies on the Anthropic API (Claude 3.5 Sonnet).

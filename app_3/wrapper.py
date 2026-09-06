@@ -62,7 +62,8 @@ class VivaWrapper:
         return list(BASE_DIR.glob("*.pdf"))
 
     @staticmethod
-    def start_session(epistemic_map: EpistemicMap, student_name: str) -> ProbingSessionManager:
+    def start_session(epistemic_map: EpistemicMap, student_name: str,
+                      assignment_brief: Optional[str] = None) -> ProbingSessionManager:
         """Starts a new Probing Session with a randomized, dynamic temperature profile."""
         # 1. Randomly decide if this run should be "Extreme" or "Moderate"
         is_extreme = random.choice([True, False])
@@ -90,7 +91,8 @@ class VivaWrapper:
             evaluator_temp=e_temp,
             advocate_temp=adv_temp
         )
-        return ProbingSessionManager(epistemic_map, student_name, experiment_profile=assigned_profile)
+        return ProbingSessionManager(epistemic_map, student_name, experiment_profile=assigned_profile,
+                                     assignment_brief=assignment_brief)
 
     @staticmethod
     def get_advocate_defense(claim: Claim, question: str, depth: int, advocate_temp: Optional[float] = None) -> Tuple[str, PapanekDimension]:

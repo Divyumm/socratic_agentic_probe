@@ -25,9 +25,15 @@ class InterventionType(str, Enum):
     CHALLENGE = "challenge"
 
 class ResponseSource(str, Enum):
+    # STUDENT is retained only so transcripts recorded before this change still
+    # load. It is no longer assigned: the system cannot observe that an answer was
+    # student-written, only that it did or did not derive from the in-app Advocate.
+    # Claiming "Student" asserted knowledge it never had, and made the Review Card
+    # report "100% student-only" for sessions where nothing had been verified.
     STUDENT = "Student"
     ADVOCATE = "Advocate"
     HYBRID = "Hybrid"
+    UNVERIFIED = "Unverified"
 
 class Claim(BaseModel):
     id: str = Field(..., description="Unique claim identifier, e.g., C-01")
@@ -72,13 +78,39 @@ class ProbeTurn(BaseModel):
     circularity_score: float = Field(..., ge=0.0, le=1.0, description="Circularity and self-referential redundancy score")
     composite_confidence: float = Field(..., ge=0.0, le=1.0, description="Combined confidence score from the classifier")
 
+    # Per-criterion rubric support and document-contradiction trace
+    rubric_criterion_scores: Dict[str, float] = Field(default_factory=dict, description="Support score per rubric criterion id")
+    contradiction_signal: float = Field(default=0.5, ge=0.0, le=1.0, description="Lowest per-sentence support against the documentation; low values indicate contradiction")
+    contradicted_sentence: Optional[str] = Field(None, description="Documentation sentence most relevant to the response, for faculty review")
+
     # State and routing
     state: StudentState = Field(..., description="Evaluated state of the student's reasoning")
+    # Longitudinal instability trace. Defaulted so transcripts recorded before
+    # escalation existed still load; a False/0 pair means "recorded pre-feature or
+    # never escalated", which is why raw_state is kept alongside the final state.
+    consecutive_unstable_turns: int = Field(0, ge=0, description="Consecutive unstable turns on this claim, counting this turn")
+    escalated_from_unstable: bool = Field(False, description="True if COLLAPSED was reached by sustained instability rather than by crossing the per-turn composite threshold")
+    raw_state: Optional[StudentState] = Field(None, description="Per-turn threshold state before any sustained-instability escalation was applied")
     reconstruction_dimension: Optional[PapanekDimension] = Field(None, description="Dimension used for routing alternative-angle recovery upon collapse")
     intervention_type: Optional[InterventionType] = Field(None, description="The type of student intervention invoked, if any")
     weight_version: str = Field("A", description="Version of classifier weights used for evaluation ('A' or 'B')")
+    # Defaults to v1-legacy so transcripts recorded before the reweighting identify
+    # themselves; without this, old and new composites would be indistinguishable.
+    composite_weights_version: str = Field("v1-legacy", description="Which composite weight set produced composite_confidence")
+    # Live scores, kept when the end-of-session audit rescores the turn. Routing
+    # during the session reacted to these, so the path the viva took is only
+    # explicable from them; the audited values sit in composite_confidence/state.
+    provisional_composite: Optional[float] = Field(None, ge=0.0, le=1.0, description="Composite as scored live during the session, before the end-of-session audit")
+    provisional_state: Optional[StudentState] = Field(None, description="State as scored live during the session, before the end-of-session audit")
     emergent_theme: Optional[str] = Field(None, description="The emergent theme name if active claim dimension is Emergent")
-    response_source: ResponseSource = Field(ResponseSource.STUDENT, description="Whether response was student-written, advocate-suggested, or hybrid")
+    response_source: ResponseSource = Field(ResponseSource.UNVERIFIED, description="Provenance relative to the in-app Advocate: ADVOCATE (submitted near-verbatim), HYBRID (edited), UNVERIFIED (no Advocate draft was generated, so provenance is unobserved)")
+    # The Advocate draft and how far the submission diverged from it. Previously
+    # the draft was discarded the moment response_source was decided, so the
+    # "intervention log" the design docs call "the richest data source in the
+    # session" was never actually recorded - only a three-way bucket survived.
+    # Both are None when no draft was generated (nothing to compare against).
+    advocate_draft: Optional[str] = Field(None, description="Raw Advocate-generated suggestion text offered for this turn, if one was generated")
+    advocate_similarity: Optional[float] = Field(None, ge=0.0, le=1.0, description="difflib similarity ratio between the submitted response and the Advocate draft; 1.0 = submitted verbatim, 0.0 = unrecognisable from the draft")
     rubric_scores: List['RubricScore'] = Field(default_factory=list, description="Per-turn qualitative rubric scores (empathy, internalisation, confidence)")
 
 class FacultyLabel(BaseModel):
@@ -150,6 +182,7 @@ class FacultyExperimentRating(BaseModel):
     evaluator_variance_accurate: bool = Field(..., description="Did the Evaluator's Variance score correctly reflect the ambiguity?")
     advocate_novel: bool = Field(..., description="Was the Advocate pivot novel?")
     advocate_relevant: bool = Field(..., description="Was the Advocate pivot relevant?")
+    expert_alignment: bool = Field(False, description="Did the AI response align with expert pedagogical expectations?")
     ground_truth_score: float = Field(..., ge=0.0, le=1.0, description="Faculty's Ground Truth grade (0.0 to 1.0) for the student's raw answer")
     faculty_id: str = Field(..., description="ID of the faculty rater")
     rated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
@@ -166,6 +199,14 @@ class SessionTranscript(BaseModel):
     
     # Extended fields
     weight_version: str = Field("A", description="Classifier weights version used in the session")
+    assignment_brief: Optional[str] = Field(None, description="Optional assignment brief supplied at session setup, used as extra context when the auditor scores evidence")
+    final_audit: Optional[Dict[str, Any]] = Field(None, description="End-of-session auditor pass: portfolio scores, mean, variance and rationales")
+    # Cached output of consistency.analyse_document (serialised via
+    # consistency.to_serialisable). None until a faculty member runs the check
+    # from the Feedback Dashboard - it is exhaustive over every claim pair in the
+    # document (a 91-claim map took ~42s), so it is computed on demand and cached
+    # here rather than run automatically on every session or every dashboard load.
+    document_integrity: Optional[Dict[str, Any]] = Field(None, description="Cached document-level foundedness and cross-claim contradiction report, computed on demand from the Feedback Dashboard")
     faculty_labels: List[FacultyLabel] = Field(default_factory=list, description="Labels assigned by faculty members")
     faculty_rubric_labels: List[FacultyRubricLabel] = Field(default_factory=list, description="Qualitative rubric labels assigned by faculty")
     evaluator_ratings: List[EvaluatorRating] = Field(default_factory=list, description="Independent blind evaluations")

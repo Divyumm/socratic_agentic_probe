@@ -34,9 +34,9 @@ def print_agent_message(message: str, prefix: str = "Assessor Agent:"):
 
 def main_menu():
     while True:
-        print_header("SOCRATIC VIVA ORCHESTRATION SYSTEM")
+        print_header("SOCRATIC ASSESSMENT ORCHESTRATION SYSTEM")
         print(" [1] Parse PDF & Extract Epistemic Map (Component 1 Document Analyser)")
-        print(" [2] Conduct Live Socratic Viva Session (Component 2 & 3 Interactive Loop)")
+        print(" [2] Conduct Live Socratic Assessment Session (Component 2 & 3 Interactive Loop)")
         print(" [3] View Past Session Transcripts")
         print(" [4] Run AI Respondent Simulation (Thesis Experiment)")
         print(" [5] Exit")
@@ -52,7 +52,7 @@ def main_menu():
         elif choice == "4":
             run_simulation_menu()
         elif choice == "5":
-            print("\nExiting Socratic Viva Orchestration. Goodbye!\n")
+            print("\nExiting Socratic Assessment Orchestration. Goodbye!\n")
             break
         else:
             print("\nInvalid choice. Please select from 1 to 5.")
@@ -110,7 +110,7 @@ def run_document_analyser():
         traceback.print_exc()
 
 def run_viva_session():
-    print_header("COMPONENT 2: LIVE SOCRATIC VIVA ENGINE")
+    print_header("COMPONENT 2: LIVE SOCRATIC ASSESSMENT ENGINE")
     
     # List processed maps
     processed_dir = PROCESSED_DATA_DIR
@@ -153,17 +153,17 @@ def run_viva_session():
     manager = ProbingSessionManager(epistemic_map, student_name)
     
     print("\n" + "=" * 80)
-    print(f" VIVA ACTIVE: {student_name.upper()} | TOPIC: {epistemic_map.document_name} ".center(80))
+    print(f" SESSION ACTIVE: {student_name.upper()} | TOPIC: {epistemic_map.document_name} ".center(80))
     print("=" * 80)
     print("Commands:")
     print("  /pause          Pause current session")
     print("  /redirect [ID]  Jump probing to a specific claim by ID (e.g. /redirect C-03)")
     print("  /challenge      pedagogically significant dispute of the assessor's state score")
-    print("  /exit           Terminate and save the viva session")
+    print("  /exit           Terminate and save the session")
     print("=" * 80)
     
     # Initial Socratic question
-    print(f"\n[VIVA START] Assessor Agent opens the viva:")
+    print(f"\n[SESSION START] Assessor Agent opens the session:")
     print_agent_message(manager.get_current_question())
     
     while True:
@@ -182,7 +182,7 @@ def run_viva_session():
                 notes = input("\nEnter final assessor comments/notes: ").strip()
                 transcript = manager.build_transcript(notes=notes)
                 saved_path = StorageManager.save_transcript(transcript)
-                print(f"\nViva terminated. Validated session transcript saved to:\n -> {saved_path.resolve()}\n")
+                print(f"\nSession terminated. Validated session transcript saved to:\n -> {saved_path.resolve()}\n")
                 break
                 
             elif cmd == "/challenge":
@@ -241,7 +241,7 @@ def run_viva_session():
                 # All claims probed and resolved
                 transcript = manager.build_transcript(notes="All claims justified cleanly.")
                 StorageManager.save_transcript(transcript)
-                print("\n[VIVA COMPLETE] The viva session has completed successfully. Transcript saved.\n")
+                print("\n[SESSION COMPLETE] The session has completed successfully. Transcript saved.\n")
                 break
                 
         except Exception as e:
@@ -301,7 +301,7 @@ def view_past_sessions():
     sessions = list(processed_dir.glob("session_*.json"))
     
     if not sessions:
-        print("\nNo saved viva sessions found.")
+        print("\nNo saved sessions found.")
         input("\nPress Enter to return...")
         return
         
@@ -328,7 +328,7 @@ def view_past_sessions():
             import json
             sess = json.load(f)
             
-        print_header(f"VIVA TRANSCRIPT: {sess['student_name'].upper()}")
+        print_header(f"SESSION TRANSCRIPT: {sess['student_name'].upper()}")
         print(f"Session ID:   {sess['session_id']}")
         print(f"Document:     {sess['document_name']}")
         print(f"Started At:   {sess['started_at']}")

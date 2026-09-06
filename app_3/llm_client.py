@@ -44,6 +44,12 @@ class SingleEvaluationRun(BaseModel):
     circularity_score: float = Field(..., description="Circularity score measuring if student just repeats question words without depth (0.0 to 1.0)")
     confidence_score: float = Field(..., description="Your own certainty in the three scores above (0.0 = genuinely ambiguous/borderline response, hard to score confidently; 1.0 = unambiguous, you are certain these scores are correct). This should reflect real uncertainty about the response's quality, not just how extreme the scores are.")
 
+class PortfolioAuditRun(BaseModel):
+    """One sample of the end-of-session auditor scoring the whole evidence portfolio."""
+    portfolio_score: float = Field(..., description="How well the evidence portfolio (documentation + full dialogue) satisfies the rubric, and the assignment brief when one is supplied (0.0 to 1.0)")
+    rationale: str = Field(..., description="One or two sentences justifying the score, for faculty review")
+
+
 class ClaimRubricEvaluation(BaseModel):
     internalisation_score: float = Field(..., description="Score for Internalisation (0.0 to 1.0) based on coding manual anchors")
     internalisation_anchor: str = Field(..., description="Anchor level label for Internalisation ('Low', 'Mid', 'High')")
@@ -227,7 +233,28 @@ Here are the text chunks from the document:
                 print(f"Batch {idx} failed with exception: {res}")
             elif res:
                 all_claims.extend(res)
-        return all_claims
+        return self._assign_unique_claim_ids(all_claims)
+
+    @staticmethod
+    def _assign_unique_claim_ids(claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Renumber merged claims so every id is unique across the whole document.
+
+        Each batch is a separate LLM call and each independently numbers its claims
+        from C-01, so concatenating batches produced heavy collisions - one real
+        document yielded 91 claims sharing only 10 distinct ids (C-01 appeared 13
+        times). Everything that resolves a claim by id then silently picked the
+        wrong claim: faculty were shown the wrong claim text and the wrong source
+        page when labelling, and claim selection treated all same-id claims as
+        already probed, locking dozens of claims out of a session after one was
+        seen.
+
+        Renumbering here - at the single point where batches merge - keeps the ids
+        opaque and sequential in document order. Only affects newly extracted maps;
+        previously saved maps keep their duplicated ids.
+        """
+        for position, claim in enumerate(claims, start=1):
+            claim["id"] = f"C-{position:03d}"
+        return claims
 
     def extract_claims(self, filename: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Extracts claims using Claude structured outputs (low temperature, deterministic)."""
@@ -323,6 +350,54 @@ Here are the text chunks from the document:
             "Can you justify this design decision from another angle?"
         ]
         return questions[min(depth, len(questions) - 1)]
+
+    def score_evidence_portfolio(self, evidence: str, rubric_text: str,
+                                 brief: Optional[str] = None,
+                                 temp: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Score a whole evidence portfolio once, for the end-of-session audit.
+
+        Called a handful of times at the END of a session rather than per turn:
+        the auditor's disagreement with itself across those samples is the variance
+        signal, and doing it once keeps both the cost and the amount of student text
+        leaving the machine bounded. Returns None on any failure so the caller can
+        drop the sample rather than fabricate a neutral score, which would
+        understate the true spread.
+        """
+        if self.client is None:
+            return None
+
+        brief_block = ""
+        if brief and brief.strip():
+            brief_block = f"\n\nASSIGNMENT BRIEF (what the work was asked to do):\n{brief.strip()[:2000]}"
+
+        prompt = f"""You are an independent auditor grading a design student's viva.
+
+EVIDENCE PORTFOLIO (their documentation and the full dialogue transcript):
+{evidence[:12000]}
+
+RUBRIC (what good evidence looks like):
+{rubric_text}{brief_block}
+
+Judge how well the EVIDENCE PORTFOLIO satisfies the RUBRIC{" and the BRIEF" if brief_block else ""}.
+Score the portfolio as a whole, not turn by turn. Judge the reasoning the student
+actually demonstrates - a concise answer that gives a specific reason is stronger
+than a long one that restates the question.
+"""
+        try:
+            resp = self.client.messages.parse(
+                model=EVALUATOR_MODEL,
+                max_tokens=1024,
+                temperature=_clamp_temp(temp if temp is not None else EVALUATOR_TEMP),
+                messages=[{"role": "user", "content": prompt}],
+                output_format=PortfolioAuditRun,
+            )
+            return resp.parsed_output.model_dump()
+        except anthropic.RateLimitError as e:
+            print(f"Claude API rate limit during portfolio audit: {e}")
+            return None
+        except Exception as e:
+            print(f"Portfolio audit call failed: {e}")
+            return None
 
     def evaluate_response(self, question: str, response: str, claim_text: str = "",
                           w_bias: Optional[float] = None,

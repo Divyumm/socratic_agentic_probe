@@ -8,8 +8,22 @@ import anthropic
 from app_3.schemas import EpistemicMap, ProbeTurn, StudentState, PapanekDimension
 from app_3.probe_engine import ProbingSessionManager
 from app_3.storage import StorageManager
-from app_3.config import MOCK_MODE, ANTHROPIC_API_KEY, ADVOCATE_MODEL, ADVOCATE_TEMP, ASSESSOR_TEMP
+from app_3.config import MOCK_MODE, ANTHROPIC_API_KEY, ADVOCATE_MODEL, ADVOCATE_TEMP, ASSESSOR_TEMP, ADVOCATE_MAX_CHARS
 from app_3.llm_client import _clamp_temp
+
+
+def _cap_advocate_length(text: str, max_chars: int) -> str:
+    """Hard, word-boundary-safe cap on the Advocate's output.
+
+    The prompt asks for brevity, but a 0.5B model does not reliably count
+    characters from an instruction - this is the deterministic backstop that
+    actually enforces the limit regardless of what the model produces.
+    """
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit(" ", 1)[0].rstrip(",.;:- ")
+    return (cut + "…") if cut else text[:max_chars].rstrip()
 
 
 def _strip_stage_directions(text: str) -> str:
@@ -95,8 +109,8 @@ class AdvocateAgent:
         # High temperature encourages rough, varied brainstorming (not polished answers)
         if self.client is not None:
             prompt = f"""
-You are a thinking partner helping a student brainstorm and explore ideas.
-IMPORTANT: Be rough, uncertain, and show your thinking process. This is brainstorming, NOT final answers.
+You are an external voice giving a student ONE brief nudge to react to - not an
+answer, not an argument for them, just a short prompt to think from.
 
 Context:
 - Claim to explore: "{claim_text}"
@@ -105,15 +119,14 @@ Context:
 - Angle to explore: {current_dim_label}
 - Depth: {depth}
 
-Generate 2-3 rough talking points (different phrasing each time):
-1. Show your uncertainty - use "maybe", "could be", "what if", "I'm not sure but..."
-2. Try different angles, even if they seem contradictory
-3. Don't polish or make perfect - show rough thinking
-4. Be conversational, like a student thinking aloud
-5. Keep each point to ONE SHORT SENTENCE (max 15 words)
-6. No markdown, asterisks, or stage directions - just natural text
+Write ONE short, uncertain nudge (not a finished thought):
+1. Under 40 words. One or two short sentences at most.
+2. Show uncertainty - "maybe", "could be", "what if" - never a settled position.
+3. Raise a single consideration or question; do NOT argue a case for the student.
+4. No markdown, asterisks, or stage directions - just plain text.
+5. Do not number or list multiple points - one consideration only.
 
-Remember: Your job is to help the student explore ideas, not to provide polished answers.
+Remember: you are prompting the student to think, not writing their answer.
 """
             try:
                 # Use VERY high temperature for diverse, varied outputs
@@ -122,11 +135,20 @@ Remember: Your job is to help the student explore ideas, not to provide polished
                 defense_text = self.client.generate(
                     prompt=prompt,
                     temperature=_clamp_temp(high_temp),
+                    # Generation budget left generous (not tied to the 128-char
+                    # target) on purpose: a 0.5B model given a tiny token budget
+                    # alongside a "be extremely brief" instruction tends to open
+                    # by echoing the constraint itself ("Under 20 words: ...")
+                    # rather than moving past it into real content, because there
+                    # is little room left to do anything else. A larger budget
+                    # gives it room to get past that opener; the deterministic
+                    # 128-char cap below is what actually enforces the length,
+                    # regardless of how much was generated.
                     max_new_tokens=200
                 )
                 defense_text = _strip_stage_directions(defense_text)
                 if defense_text:
-                    return defense_text, pivot_dimension
+                    return _cap_advocate_length(defense_text, ADVOCATE_MAX_CHARS), pivot_dimension
             except Exception as e:
                 print(f"Local SLM Advocate generation failed: {e}. Falling back to default defense.")
 
@@ -146,7 +168,7 @@ Remember: Your job is to help the student explore ideas, not to provide polished
                 f"This explains why I care about the {pivot_from}."
             )
             
-        return defense_text, pivot_dimension
+        return _cap_advocate_length(defense_text, ADVOCATE_MAX_CHARS), pivot_dimension
 
 class EvaluatorAgent:
     """Simulates the Evaluator Agent that judges substantive coherence."""
@@ -188,21 +210,104 @@ class EvaluatorAgent:
             return "The response addresses the question."
 
 class QualityAuditorAgent:
-    """Simulates the Quality Auditor Agent that checks Documentation vs Rubric."""
+    """Scores the evidence portfolio (documentation + dialogue) against the rubric.
+
+    Previously this agent never saw the evidence at all: source_passage was taken
+    as an argument and then never referenced in the prompt, and the prompt itself
+    branched on an nli_score that had ALREADY decided the verdict, asking the model
+    only to write a sentence agreeing with it. The "variance" derived from it was
+    therefore the wording jitter of a rubber stamp - it moved more between reruns
+    of the same turn than between different turns, and the resulting text was then
+    averaged back into grounding as if it were independent evidence, though it had
+    been generated from the grounding score in the first place.
+
+    It now does what it is named for: the evidence goes into the prompt, the model
+    returns a number, and repeated samples give a genuine self-consistency spread.
+    Stays entirely on the local SLM - no coursework text leaves the machine, and
+    temperature remains available.
+    """
+
+    # Keep prompts inside the small model's usable context.
+    MAX_EVIDENCE_CHARS = 1800
+    MAX_BRIEF_CHARS = 600
+
     def __init__(self):
         from app_3.local_llm import LocalGenerator
         self.client = LocalGenerator()
-        
-    def generate_evaluation(self, source_passage: str, rubric_text: str, nli_score: float, temp: float = 0.6) -> str:
-        if nli_score > 0.6:
-            prompt = f"The source documentation logically entails the rubric requirement '{rubric_text}'. In one short sentence, validate that the documentation provides rigorous evidence for this standard."
-        else:
-            prompt = f"The source documentation fails to entail the rubric requirement '{rubric_text}'. In one short sentence, warn that the documentation lacks the required rigour."
-        
+
+    @staticmethod
+    def _parse_score(text: str) -> Optional[float]:
+        """Pull the first 0-1 number out of the model's reply.
+
+        A 0.5B model will not reliably emit bare JSON, so anything unparseable
+        returns None and is dropped by the caller rather than silently becoming
+        a neutral 0.5 - a fabricated midpoint would understate the true spread.
+        """
+        import re
+        for tok in re.findall(r"\d*\.?\d+", text or ""):
+            try:
+                v = float(tok)
+            except ValueError:
+                continue
+            if 0.0 <= v <= 1.0:
+                return v
+            if 1.0 < v <= 100.0:      # model answered on a 0-100 scale
+                return v / 100.0
+        return None
+
+    def build_prompt(self, evidence: str, rubric_text: str,
+                     brief: Optional[str] = None) -> str:
+        ev = (evidence or "")[: self.MAX_EVIDENCE_CHARS]
+        parts = [
+            "You are grading a design student's viva evidence.",
+            "",
+            "EVIDENCE (their documentation and what they said in the dialogue):",
+            ev,
+            "",
+            "RUBRIC (what good evidence looks like):",
+            rubric_text,
+        ]
+        if brief and brief.strip():
+            parts += ["", "ASSIGNMENT BRIEF (what the work was asked to do):",
+                      brief.strip()[: self.MAX_BRIEF_CHARS]]
+        parts += [
+            "",
+            "How well does the EVIDENCE satisfy the RUBRIC"
+            + (" and the BRIEF" if brief and brief.strip() else "") + "?",
+            "Reply with ONLY a number between 0.00 and 1.00. No words.",
+        ]
+        return "\n".join(parts)
+
+    def score_evidence(self, evidence: str, rubric_text: str,
+                       brief: Optional[str] = None,
+                       n_samples: int = 3, temp: float = 0.7) -> List[float]:
+        """Sample the auditor n_samples times; returns the parsed scores.
+
+        All samples run at the SAME temperature - the spread is meant to come from
+        sampling the model, so varying temperature between draws would confound
+        self-consistency with a temperature sweep.
+        """
+        prompt = self.build_prompt(evidence, rubric_text, brief)
+        scores = []
+        for _ in range(max(1, n_samples)):
+            try:
+                raw = self.client.generate(prompt=prompt, temperature=temp, max_new_tokens=8)
+            except Exception:
+                continue
+            v = self._parse_score(raw)
+            if v is not None:
+                scores.append(v)
+        return scores
+
+    def generate_evaluation(self, source_passage: str, rubric_text: str,
+                            nli_score: float = 0.5, temp: float = 0.6) -> str:
+        """Deprecated prose path, kept so older callers do not break."""
+        prompt = self.build_prompt(source_passage, rubric_text)
         try:
             return self.client.generate(prompt=prompt, temperature=temp, max_new_tokens=60).strip()
-        except:
+        except Exception:
             return "The documentation aligns with the rubric."
+
 
 def run_adversarial_simulation(epistemic_map: EpistemicMap, max_turns: int = 10):
     """Executes the step-by-step Adversarial Socratic Simulation (Thesis Experiment)."""
@@ -275,25 +380,32 @@ def run_adversarial_simulation(epistemic_map: EpistemicMap, max_turns: int = 10)
         # Save response for next probe
         last_response = response
         
-        # 1. Assessor NLI: Rubric vs Question
-        rubric_text = "The student must demonstrate critical thinking and logical consistency."
-        assessor_nli = nli_auditor.compute_entailment(rubric_text, question)
-        
-        # 2. Evaluator NLI: Question vs Answer
-        evaluator_nli = nli_auditor.compute_entailment(question, response)
-        
+        # 1. Assessor: is the question relevant to the rubric? A question has no
+        #    truth value, so this is a relevance check, not an entailment one.
+        from app_3.rubric import rubric_summary_text
+        rubric_text = rubric_summary_text()
+        assessor_nli = nli_auditor.compute_sts_similarity(rubric_text, question)
+
+        # 2. Evaluator: question vs answer is likewise a relevance relation.
+        evaluator_nli = nli_auditor.compute_qa_coherence(question, response)
+
         # 3. Quality Auditor MC Sampling (Variance based on Auditor NLI: Evaluation vs Rubric)
         print("   [Sampling 3 Quality Auditor evaluations (Bracketed Temp Sweep) for Variance calculation...]")
-        base_auditor_nli = nli_auditor.compute_entailment(active_claim.source_passage, rubric_text)
-        
+        base_auditor_nli = nli_auditor.compute_support_vs_document(
+            active_claim.source_passage, rubric_text
+        )["support"]
+
         mc_auditor_nli_scores = []
         for t in [0.3, 0.7, 1.0]:
             audit_resp = audit_agent.generate_evaluation(active_claim.source_passage, rubric_text, base_auditor_nli, temp=t)
             # Measure variance in how consistently the Auditor evaluates the document against the rubric
-            score = nli_auditor.compute_entailment(audit_resp, rubric_text)
+            score = nli_auditor.compute_support_vs_document(audit_resp, rubric_text)["support"]
             mc_auditor_nli_scores.append(score)
-            
-        advocate_nli = nli_auditor.compute_entailment(active_claim.source_passage, response)
+
+        # Documentation vs answer: both propositions, so a genuine entailment pair.
+        advocate_nli = nli_auditor.compute_support_vs_document(
+            active_claim.source_passage, response
+        )["support"]
         
         # Calculate Variance as the standard deviation of the 3 sampled Quality Auditor NLI scores
         import numpy as np

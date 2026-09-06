@@ -13,6 +13,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from app_3.wrapper import VivaWrapper
 from app_3.schemas import EpistemicMap, Claim, PapanekDimension, StudentState, InterventionType, ResponseSource
 from app_3.config import BASE_DIR
+from app_3.theme import inject_theme
 from difflib import SequenceMatcher
 
 def _composite_to_letter_grade(composite_score: float) -> str:
@@ -30,141 +31,13 @@ def _composite_to_letter_grade(composite_score: float) -> str:
 
 # Set page configuration with a modern title and icon
 st.set_page_config(
-    page_title="Socratic Viva Assessment",
+    page_title="Socratic Assessment",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Plain HTML Web 1.0 aesthetic style overrides
-st.markdown("""
-<style>
-    /* Reset premium styling for Web 1.0 barebones theme */
-    html, body, .stApp {
-        font-family: "Times New Roman", Times, serif;
-        background-color: #ffffff !important;
-        color: #000000 !important;
-    }
-    /* Force all text elements to black, but don't force font-family on everything to save icons */
-    h1, h2, h3, h4, h5, h6, p, label, li, td, th {
-        color: #000000 !important;
-    }
-    span {
-        color: #000000;
-    }
-    /* Style buttons to classic Web 1.0 grey boxes */
-    button, .stButton > button {
-        background-color: #f0f0f0 !important;
-        color: #000000 !important;
-        border: 1px solid #000000 !important;
-        border-radius: 0px !important;
-        padding: 4px 12px !important;
-    }
-    button:hover, .stButton > button:hover {
-        background-color: #e0e0e0 !important;
-        color: #000000 !important;
-        border: 1px solid #000000 !important;
-    }
-    button:focus, .stButton > button:focus {
-        color: #000000 !important;
-        background-color: #e0e0e0 !important;
-    }
-    
-    /* Header card */
-    .header-card {
-        border: 2px double #000000;
-        padding: 15px;
-        margin-bottom: 20px;
-        text-align: center;
-        background-color: #f0f0f0;
-    }
-    .header-title {
-        color: #000000 !important;
-        font-size: 2rem;
-        font-weight: bold;
-        margin-bottom: 5px;
-    }
-    .header-subtitle {
-        color: #333333;
-        font-size: 1rem;
-    }
-    
-    /* Card containers */
-    .glass-card {
-        border: 1px solid #000000;
-        padding: 15px;
-        margin-bottom: 12px;
-        background-color: #fafafa;
-    }
-    
-    .claim-card {
-        border-left: 6px solid #000000;
-        background-color: #f5f5f5;
-    }
-    
-    /* State badges */
-    .badge {
-        padding: 4px 8px;
-        font-size: 0.85rem;
-        font-weight: bold;
-        display: inline-block;
-        border: 1px solid #000000;
-    }
-    .badge-grounded {
-        background-color: #e0ffe0;
-        color: #008000 !important;
-    }
-    .badge-unstable {
-        background-color: #fffae0;
-        color: #b8860b !important;
-    }
-    .badge-collapsed {
-        background-color: #ffe0e0;
-        color: #ff0000 !important;
-    }
-    .badge-paused {
-        background-color: #f0f0f0;
-        color: #555555 !important;
-    }
-    
-    /* Chat layout styling */
-    .chat-bubble {
-        padding: 10px 12px;
-        margin-bottom: 10px;
-        max-width: 90%;
-        line-height: 1.4;
-    }
-    .assessor-bubble {
-        background-color: #f2f2f2;
-        color: #000000 !important;
-        border: 1px solid #999999;
-        border-left: 4px solid #000000;
-    }
-    .student-bubble {
-        background-color: #ffffff;
-        color: #000000 !important;
-        border: 2px double #000000;
-        margin-left: auto;
-    }
-    .advocate-hint-bubble {
-        background-color: #fcf0ff;
-        color: #000000 !important;
-        border: 1px dotted #800080;
-        font-style: italic;
-    }
-    
-    /* Custom metric display */
-    .metric-value {
-        font-size: 1.6rem;
-        font-weight: bold;
-        color: #000000 !important;
-    }
-    .metric-label {
-        font-size: 0.85rem;
-        color: #555555;
-    }
-</style>
-""", unsafe_allow_html=True)
+inject_theme()
 
 # Initialize Session State Variables
 if "consent_approved" not in st.session_state:
@@ -175,6 +48,8 @@ if "epistemic_map" not in st.session_state:
     st.session_state.epistemic_map = None
 if "session_manager" not in st.session_state:
     st.session_state.session_manager = None
+if "assignment_brief" not in st.session_state:
+    st.session_state.assignment_brief = ""
 if "advocate_suggestion" not in st.session_state:
     st.session_state.advocate_suggestion = ""
 if "advocate_was_generated" not in st.session_state:
@@ -211,8 +86,8 @@ if "fallback_warning" not in st.session_state:
 # App Title Header
 st.markdown("""
 <div class="header-card">
-    <div class="header-title">Agentic Socratic Assessment</div>
-    <div class="header-subtitle">Design Engineering Viva Interface</div>
+    <div class="header-title">Socratic Assessment</div>
+    <div class="header-subtitle">Student Interface</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -220,31 +95,12 @@ st.markdown("""
 # SCREEN 1: Consent Gate & ID Entry
 # ==========================================
 if not st.session_state.consent_approved:
-    st.subheader("Ethics Consent Gate & Participant Registration")
+    st.subheader("Participant Registration")
     
-    st.markdown("""
-    ### Participant Information & Consent Form
-    **Study Title**: Agentic Socratic Assessment for Design Reasoning
-    
-    **Supervisor**: Andrew Brand 
-    **Student Researcher**: Divyum Maheshwari 
-    **Institution**: Imperial College London
-    
-    Please read the following details carefully before proceeding:
-    1. **Purpose**: The purpose of this system is to analyze design reasoning and assess how students justify coursework claims.
-    2. **Weights & Parameters Simulation**: You will be able to adjust the scoring weights of the evaluation model (Coherence, Grounding, Variance, Circularity) and see state transitions in real time.
-    3. **Advocate Co-creation**: You can co-create responses with an AI Advocate Agent who acts as your defense counsel.
-    4. **Data Handling & Anonymity**: All inputs (text entries, dynamic weights, response evaluation metrics, and session timestamps) are anonymized.
-    5. **Withdrawal**: You are free to stop the session at any time.
-    """)
-    
-    consent_check = st.checkbox("I consent to participate in this study under the terms outlined above.")
     part_id = st.text_input("Enter Anonymised Participant ID (e.g., P-03, Student-05):", placeholder="P-01").strip()
     
     if st.button("Unlock Assessment Interface", type="primary"):
-        if not consent_check:
-            st.error("You must agree to the consent form before proceeding.")
-        elif not part_id:
+        if not part_id:
             st.error("Please enter a Participant ID to maintain anonymity.")
         else:
             st.session_state.consent_approved = True
@@ -255,15 +111,46 @@ if not st.session_state.consent_approved:
 # SCREEN 2: Document Uploader & Setup
 # ==========================================
 elif st.session_state.epistemic_map is None:
-    st.subheader("Document Setup & Epistemic Mapping")
+    st.subheader("Document Setup & Knowledge Extraction")
     
     col1, col2 = st.columns(2)
     
     with col1:
+        # Optional assignment brief. Fed to the Quality Auditor alongside the rubric
+        # so the evidence is judged against what the work was actually asked to do,
+        # not the rubric alone. Entirely optional - sessions run unchanged without it.
+        with st.expander("📋 Add assignment brief (optional)", expanded=False):
+            st.caption(
+                "The brief the coursework was set against. When provided it is given to "
+                "the Quality Auditor together with the rubric when it scores the "
+                "evidence. Leave empty to score against the rubric alone."
+            )
+            brief_file = st.file_uploader(
+                "Upload brief (.txt or .md)", type=["txt", "md"], key="brief_upload"
+            )
+            if brief_file is not None:
+                try:
+                    st.session_state.assignment_brief = brief_file.read().decode(
+                        "utf-8", errors="replace"
+                    )
+                    st.success(f"Loaded brief from {brief_file.name}")
+                except Exception as e:
+                    st.error(f"Could not read brief: {e}")
+            st.session_state.assignment_brief = st.text_area(
+                "Or paste the brief here:",
+                value=st.session_state.get("assignment_brief", ""),
+                height=140,
+                key="brief_text",
+            )
+            if st.session_state.assignment_brief.strip():
+                st.caption(
+                    f"Brief attached — {len(st.session_state.assignment_brief.split())} words."
+                )
+
         st.markdown("""
         <div class="glass-card">
-            <h4>Option A: Select Pre-processed Epistemic Map</h4>
-            <p>Load an existing document map extracted from prior coursework.</p>
+            <h4>Option A: Select Pre-processed Knowledge Map</h4>
+            <p>Load an existing document map extracted from prior documentation.</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -274,7 +161,8 @@ elif st.session_state.epistemic_map is None:
                 loaded_map = VivaWrapper.load_map(selected_map)
                 if loaded_map:
                     st.session_state.epistemic_map = loaded_map
-                    st.session_state.session_manager = VivaWrapper.start_session(loaded_map, st.session_state.participant_id)
+                    st.session_state.session_manager = VivaWrapper.start_session(loaded_map, st.session_state.participant_id,
+                                                                              assignment_brief=st.session_state.assignment_brief or None)
                     st.session_state.viva_active = True
                     manager = st.session_state.session_manager
                     active_c = manager.active_claim
@@ -293,13 +181,13 @@ elif st.session_state.epistemic_map is None:
                 else:
                     st.error("Failed to load map file.")
         else:
-            st.info("No pre-processed maps found. Please parse a new PDF coursework file.")
+            st.info("No pre-processed maps found. Please parse a new PDF documentation file.")
 
     with col2:
         st.markdown("""
         <div class="glass-card">
-            <h4>Option B: Parse New Coursework PDF</h4>
-            <p>Extract claims and build a new Epistemic Map dynamically using LLM extraction.</p>
+            <h4>Option B: Parse New Documentation PDF</h4>
+            <p>Extract claims and build a new Knowledge Map dynamically using automated extraction.</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -309,7 +197,7 @@ elif st.session_state.epistemic_map is None:
         
         selected_local_pdf = st.selectbox("Choose a PDF in project folder:", ["-- Select file --"] + local_pdf_names)
         
-        uploaded_file = st.file_uploader("Or upload coursework PDF:", type="pdf")
+        uploaded_file = st.file_uploader("Or upload documentation PDF:", type="pdf")
         
         pdf_to_parse = None
         if uploaded_file is not None:
@@ -321,9 +209,9 @@ elif st.session_state.epistemic_map is None:
         elif selected_local_pdf != "-- Select file --":
             pdf_to_parse = str(BASE_DIR / selected_local_pdf)
 
-        if pdf_to_parse and st.button("Parse Coursework and Extract Map"):
+        if pdf_to_parse and st.button("Parse Documentation and Extract Map"):
             try:
-                with st.status("Building epistemic map...", expanded=True) as status:
+                with st.status("Building knowledge map...", expanded=True) as status:
                     status.update(label="📄 Parsing document...", state="running")
                     parsed_map = VivaWrapper.parse_pdf_to_map(pdf_to_parse)
 
@@ -334,7 +222,8 @@ elif st.session_state.epistemic_map is None:
                     st.session_state.epistemic_map = parsed_map
 
                     status.update(label="⚙️ Initializing session...", state="running")
-                    st.session_state.session_manager = VivaWrapper.start_session(parsed_map, st.session_state.participant_id)
+                    st.session_state.session_manager = VivaWrapper.start_session(parsed_map, st.session_state.participant_id,
+                                                                              assignment_brief=st.session_state.assignment_brief or None)
                     st.session_state.viva_active = True
                     manager = st.session_state.session_manager
                     active_c = manager.active_claim
@@ -358,7 +247,7 @@ elif st.session_state.epistemic_map is None:
                 st.error(f"Error parsing PDF: {e}")
 
 # ==========================================
-# SCREEN 3: Socratic Probing Viva Session
+# SCREEN 3: Socratic Probing Session
 # ==========================================
 else:
     manager = st.session_state.session_manager
@@ -392,19 +281,49 @@ else:
             st.info("Session paused.")
             
         # Exit and Save
-        if st.button("Save & Exit Viva", use_container_width=True, type="primary"):
-            transcript = manager.build_transcript(notes=f"Student-calibrated live run. Participant ID: {st.session_state.participant_id}")
+        if st.button("Save & Exit Session", use_container_width=True, type="primary"):
+            # End-of-session auditor pass. Runs ONCE here, never in the per-turn
+            # checkpoint autosave below, so the API is called a handful of times per
+            # viva rather than a handful of times per turn. If it fails or no key is
+            # configured it returns None and the session keeps its live scores.
+            with st.spinner("Auditing the full session..."):
+                try:
+                    audit = manager.run_final_audit()
+                except Exception as e:
+                    audit = None
+                    st.warning(f"Final audit could not run ({e}). Live scores retained.")
+            if audit:
+                manager.apply_final_audit(audit)
+                st.caption(
+                    f"Final audit complete — portfolio {audit['portfolio_mean']:.2f} "
+                    f"(variance {audit['portfolio_variance']:.3f} across "
+                    f"{audit['n_samples']} samples"
+                    + (", brief included)" if audit.get("brief_used") else ")")
+                )
+            else:
+                st.caption("Final audit unavailable — showing live session scores.")
+
+            # completed=True marks the session finished, which is what makes
+            # build_transcript assemble the Review Card. It was never passed at any
+            # call site, so no session could produce a card and the Primary Review
+            # Card tab was unreachable for every transcript ever recorded. Only the
+            # Save & Exit path sets it - the two checkpoint autosaves below are
+            # mid-session by definition and must stay completed=False.
+            transcript = manager.build_transcript(
+                notes=f"Student-calibrated live run. Participant ID: {st.session_state.participant_id}",
+                completed=True,
+            )
             saved_path = VivaWrapper.save_transcript(transcript)
 
             # Calculate final grade based on average composite confidence
             if transcript.turns:
                 avg_composite = sum(t.composite_confidence for t in transcript.turns) / len(transcript.turns)
                 final_grade = _composite_to_letter_grade(avg_composite)
-                grade_color = "#2ecc71" if final_grade in ["A", "B"] else "#f39c12" if final_grade == "C" else "#e74c3c"
+                grade_color = "#34d399" if final_grade in ["A", "B"] else "#fbbf24" if final_grade == "C" else "#f87171"
             else:
                 avg_composite = 0.0
                 final_grade = "F"
-                grade_color = "#e74c3c"
+                grade_color = "#f87171"
 
             st.session_state.epistemic_map = None
             st.session_state.session_manager = None
@@ -416,7 +335,7 @@ else:
             <div style="text-align: center; padding: 20px; border: 3px solid {grade_color}; border-radius: 8px; margin: 20px 0;">
                 <h3>Final Grade: <span style="color: {grade_color}; font-size: 48px; font-weight: bold;">{final_grade}</span></h3>
                 <p>Average reasoning confidence: {avg_composite:.1%}</p>
-                <p style="font-size: 14px; color: #666;">Your viva assessment is complete. Faculty will review your reasoning depth, and you'll receive detailed feedback on your design rationale.</p>
+                <p style="font-size: 14px; color: #9aa3ae;">Your assessment is complete. Faculty will review your reasoning depth, and you'll receive detailed feedback on your design rationale.</p>
             </div>
             """, unsafe_allow_html=True)
             st.info("Exited session. Thank you!")
@@ -464,11 +383,11 @@ else:
         st.markdown(f"""
         <div class="glass-card claim-card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <span style="font-weight: 700; font-size: 1.1rem; color: #8b5cf6;">ACTIVE CLAIM: {html.escape(active_claim.id)}</span>
+                <span style="font-weight: 700; font-size: 1.1rem; color: #a78bfa;">ACTIVE CLAIM: {html.escape(active_claim.id)}</span>
                 <span class="badge {badge_class}">{state_label}</span>
             </div>
-            <p style="font-size: 1rem; color: #000000; margin-bottom: 8px;"><b>Extracted Claim:</b> "{clean_text}"</p>
-            <div style="display: flex; gap: 20px; font-size: 0.85rem; color: #555555;">
+            <p style="font-size: 1rem; color: #e6e8eb; margin-bottom: 8px;"><b>Extracted Claim:</b> "{clean_text}"</p>
+            <div style="display: flex; gap: 20px; font-size: 0.85rem; color: #9aa3ae;">
                 <span><b>{dim_label}:</b> {dim_val}</span>
                 <span><b>Probing Depth:</b> {manager.active_depth} / 3</span>
                 <span><b>Vulnerability Rank:</b> {active_claim.vulnerability_rank}</span>
@@ -490,7 +409,7 @@ else:
         # Display past turns in chat bubbles
         for turn in manager.turns:
             if turn.intervention_type == InterventionType.PAUSE:
-                st.markdown('<div class="chat-bubble student-bubble" style="background-color: #374151; border-color: #4b5563;">[System Action: Session Paused]</div>', unsafe_allow_html=True)
+                st.markdown('<div class="chat-bubble student-bubble" style="background-color: #1c2129; border-color: #454d5a;">[System Action: Session Paused]</div>', unsafe_allow_html=True)
                 continue
             
             # Find the dimension of the claim at that turn for accurate translation
@@ -598,17 +517,25 @@ else:
 
                             status.update(label="✅ Response fully evaluated", state="complete")
 
-                        # Detect response source based on whether advocate was generated
+                        # Provenance is only observable RELATIVE TO THE ADVOCATE. If no
+                        # Advocate draft was generated there is nothing to compare against,
+                        # so the turn stays UNVERIFIED rather than claiming it was student
+                        # written - the system cannot see whether the text came from the
+                        # student, an external model, or anywhere else.
                         if st.session_state.advocate_was_generated:
                             similarity = SequenceMatcher(None, response_input_text.lower(), st.session_state.advocate_suggestion.lower()).ratio()
+                            # Record the draft and the divergence, not just the bucket it
+                            # falls into. This is the "intervention log" the design calls
+                            # the richest data source in the session - it was computed and
+                            # then discarded every single turn until now.
+                            turn.advocate_draft = st.session_state.advocate_suggestion
+                            turn.advocate_similarity = round(similarity, 4)
                             if similarity >= 0.85:
                                 turn.response_source = ResponseSource.ADVOCATE
                             elif similarity >= 0.50:
                                 turn.response_source = ResponseSource.HYBRID
                             else:
-                                turn.response_source = ResponseSource.STUDENT
-                        else:
-                            turn.response_source = ResponseSource.STUDENT
+                                turn.response_source = ResponseSource.UNVERIFIED
 
                         st.session_state.last_turn_result = turn
                         st.session_state.next_prompt = next_prompt
@@ -701,6 +628,8 @@ else:
                     </div>
                     """, unsafe_allow_html=True)
 
+
+
                 # Composite Confidence Score gauge
                 st.markdown(f"""
                 <div class="glass-card" style="text-align: center; border-color: rgba(139, 92, 246, 0.4);">
@@ -727,7 +656,6 @@ else:
             )
             if st.button("Submit Challenge"):
                 manager.record_challenge(
-                    system_explanation=st.session_state.challenge_response,
                     justification=challenge_justification,
                 )
                 st.success("Challenge logged for faculty review.")

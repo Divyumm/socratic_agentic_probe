@@ -9,9 +9,57 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from app_3.storage import StorageManager
-from app_3.schemas import StudentState, FacultyLabel, EvaluatorRating, FacultyExperimentRating, ResponseSource
+from app_3.schemas import StudentState, FacultyLabel, EvaluatorRating, FacultyExperimentRating
 from app_3.config import BASE_DIR
 from app_3.wrapper import VivaWrapper
+from app_3.theme import inject_theme
+from app_3.review_helpers import (
+    claim_for_turn as resolve_claim_for_turn,
+    composite_to_letter_grade,
+    response_source_counts,
+    rubric_criterion_means,
+    contradiction_flags,
+    responsiveness_summary,
+    intervention_effort_summary,
+)
+
+
+# Login roles. Access is partitioned so each role only ever sees the surface it
+# is meant to judge - in particular, Experiment Rating belongs to Expert
+# Alignment alone, keeping the temperature experiment double-blind.
+ROLE_PRIMARY = "Primary Evaluator"
+ROLE_INDEPENDENT = "Independent Assessor"
+ROLE_EXPERT_ALIGNMENT = "Expert Alignment"
+
+
+def review_card_is_populated(transcript) -> bool:
+    """True only when the review card carries a complete set of data.
+
+    A half-built card (no composite score, no notes, or a session with no turns)
+    is misleading to grade against, so the Primary Review Card is hidden entirely
+    rather than rendered with blanks.
+    """
+    rc = getattr(transcript, "review_card", None)
+    if rc is None:
+        return False
+    if not transcript.turns:
+        return False
+    if rc.composite_confidence is None:
+        return False
+    return True
+
+
+def evaluator_rating_is_populated(rating) -> bool:
+    """True only when a submitted blind rating carries a complete set of data."""
+    if rating is None:
+        return False
+    if not (rating.judgement or "").strip():
+        return False
+    if rating.rating_score is None:
+        return False
+    if not (rating.notes or "").strip():
+        return False
+    return True
 
 
 def render_source_pane(document_name: str, claim) -> None:
@@ -24,7 +72,9 @@ def render_source_pane(document_name: str, claim) -> None:
 
     pdf_path = BASE_DIR / document_name
     if not pdf_path.exists():
-        st.warning(f"Source PDF '{document_name}' not found in the project root. Showing extracted text passage only.")
+        pdf_path = BASE_DIR / "Misc" / document_name
+        
+    if not pdf_path.exists():
         st.markdown(f"> *{claim.source_passage}*")
         return
 
@@ -71,124 +121,17 @@ def show_reasoning_state_definitions() -> None:
         """)
 
 
-# Plain HTML Web 1.0 aesthetic style overrides
-st.markdown("""
-<style>
-    /* Reset premium styling for Web 1.0 barebones theme */
-    *, *:before, *:after {
-        font-family: "Times New Roman", Times, serif !important;
-    }
-    /* Exempt Streamlit's Material Icons (expander arrows etc.) from the
-    blanket font-family override above - without this, icon ligature text
-    (e.g. "keyboard_arrow_right") renders as literal overlapping text instead
-    of the arrow glyph it's supposed to be. */
-    [data-testid="stIconMaterial"] {
-        font-family: "Material Symbols Rounded" !important;
-    }
-    html, body, .stApp {
-        background-color: #ffffff !important;
-        color: #000000 !important;
-    }
-    /* Force all text elements to black */
-    h1, h2, h3, h4, h5, h6, p, label, span, li, td, th {
-        color: #000000 !important;
-    }
-    /* Style buttons to classic Web 1.0 grey boxes */
-    button, .stButton > button {
-        background-color: #f0f0f0 !important;
-        color: #000000 !important;
-        border: 1px solid #000000 !important;
-        border-radius: 0px !important;
-        padding: 4px 12px !important;
-    }
-    button:hover, .stButton > button:hover {
-        background-color: #e0e0e0 !important;
-        color: #000000 !important;
-        border: 1px solid #000000 !important;
-    }
-    button:focus, .stButton > button:focus {
-        color: #000000 !important;
-        background-color: #e0e0e0 !important;
-    }
-    /* Web 1.0 style borders and tables */
-    .box {
-        border: 1px solid #000000 !important;
-        padding: 12px !important;
-        background-color: #f0f0f0 !important;
-        color: #000000 !important;
-        margin-bottom: 15px !important;
-    }
-    .box b, .box span, .box p {
-        color: #000000 !important;
-    }
-    .system-badge {
-        font-weight: bold !important;
-        color: #0000ff !important;
-    }
-    .review-card-header {
-        background-color: #e8e8e8 !important;
-        padding: 10px !important;
-        border: 2px solid black !important;
-        text-align: center;
-        margin-bottom: 20px;
-    }
-</style>
-""", unsafe_allow_html=True)
+inject_theme()
 
-st.title("Faculty Labelling System (Web 1.0 Edition)")
-st.write("---")
-
-# Ethics & Faculty Information Gate
-if "faculty_consented" not in st.session_state:
-    st.session_state.faculty_consented = False
-
-if not st.session_state.faculty_consented:
-    st.markdown("""
-    ## Faculty Evaluator Information & Consent
-
-    **Study Title:** Agentic Socratic Assessment for Design Reasoning
-
-    **Evaluator Role:** You are being asked to review and label student reasoning transcripts as part of a research study evaluating the effectiveness of an AI-assisted Socratic viva assessment system.
-
-    ### Your Responsibilities:
-    1. **Review student responses** to probing questions about design claims
-    2. **Label reasoning states** (Grounded, Unstable, Collapsed) to validate system classifications
-    3. **Rate system performance** on aspects like hallucination, repetition, and pivot novelty
-    4. **Provide independent evaluations** if assigned to the blind evaluation track
-    5. **Maintain confidentiality** of student identifiers and session data
-
-    ### Data Handling:
-    - All ratings and labels will be securely stored
-    - Session data is used solely for research and system improvement
-    - Your evaluation is protected and linked only to your evaluator ID
-    - You may stop labelling at any time without penalty
-
-    ### Important Notes:
-    - This research is conducted under ethical oversight
-    - Your participation is voluntary and informed
-    - Any questions about the study may be directed to the research team
-    """)
-
-    col_consent1, col_consent2 = st.columns(2)
-    with col_consent1:
-        consent_ack = st.checkbox("I acknowledge that I understand my role as a faculty evaluator in this study")
-    with col_consent2:
-        data_ack = st.checkbox("I consent to my ratings being used for research purposes")
-
-    if consent_ack and data_ack:
-        if st.button("Proceed to Faculty Labelling", type="primary", use_container_width=True):
-            st.session_state.faculty_consented = True
-            st.rerun()
-    else:
-        st.info("Please acknowledge both statements to proceed.")
-        st.stop()
-
+st.title("Evaluator Dashboard")
 st.write("---")
 
 # 1. Capture Labeller ID
-col_labeller, col_change = st.columns([4, 1])
+col_role, col_labeller, col_change = st.columns([2, 3, 1])
+with col_role:
+    role = st.selectbox("Login Role:", [ROLE_PRIMARY, ROLE_INDEPENDENT, ROLE_EXPERT_ALIGNMENT])
 with col_labeller:
-    labeller_id = st.text_input("Faculty ID:", value="Professor_A").strip()
+    labeller_id = st.text_input("Evaluator ID:", value="Evaluator_A").strip()
 with col_change:
     if st.button("🔄 Change & Restart", use_container_width=True):
         st.session_state.turn_step = None
@@ -201,7 +144,7 @@ checkpoints = StorageManager.list_checkpoints()
 
 # Show recovery banner if checkpoints exist
 if checkpoints:
-    st.warning("⚠️ **Incomplete Sessions Detected** - Sessions saved but not finalized (browser closed without clicking 'Save & Exit')")
+
     with st.expander("📋 View & Recover Incomplete Sessions"):
         for ckpt in checkpoints:
             col1, col2, col3 = st.columns([2, 1, 1])
@@ -232,20 +175,50 @@ else:
         
         if transcript:
             st.write(f"**Student:** {transcript.student_name} | **Document:** {transcript.document_name}")
-            st.write(f"**Started At:** {transcript.started_at}")
+            try:
+                formatted_date = datetime.fromisoformat(transcript.started_at).strftime("%B %d, %Y at %I:%M %p")
+            except Exception:
+                formatted_date = transcript.started_at
+            st.write(f"**Started At:** {formatted_date}")
             
-            role = st.selectbox("Login Role:", ["Faculty Assessor", "Independent Evaluator"])
-            blind_mode = (role == "Independent Evaluator")
+            with st.expander("📋 View/Edit Assignment Brief", expanded=False):
+                st.write("The brief the coursework was set against. (Updating this will save it to the session transcript)")
+                current_brief = transcript.assignment_brief or ""
+                new_brief = st.text_area("Assignment Brief:", value=current_brief, height=150, key=f"brief_{selected_session}")
+                if st.button("Submit Brief", key=f"submit_btn_{selected_session}"):
+                    if new_brief != current_brief:
+                        transcript.assignment_brief = new_brief
+                        StorageManager.save_transcript(transcript)
+                        st.success("Brief updated!")
+                    else:
+                        st.info("No changes made.")
             
+            blind_mode = (role == ROLE_INDEPENDENT)
+
+            tab1 = tab2 = tab3 = tab4 = None
+
             if blind_mode:
-                tab1, tab2, tab3, tab4 = st.tabs(["[LOCKED] Data", "[LOCKED] Review Card", "Independent Blind Evaluation", "[LOCKED] Experiment Rating"])
+                # Assessor mode is deliberately single-purpose: the blind judgement
+                # is only valid if the assessor never sees system scores, review
+                # cards or experiment ratings. Nothing else is rendered.
+                tabs = st.tabs(["Independent Blind Evaluation"])
+                tab3 = tabs[0]
+            elif role == ROLE_EXPERT_ALIGNMENT:
+                # Experiment Rating is exclusive to the Expert Alignment role.
+                tabs = st.tabs(["Experiment Rating"])
+                tab4 = tabs[0]
             else:
-                tab1, tab2, tab3, tab4 = st.tabs(["Data Labelling", "Faculty Jury Review Card", "[LOCKED] Evaluation", "Experiment Rating"])
-            
-            with tab1:
-                if blind_mode:
-                    st.error("ACCESS DENIED: Data Labelling is structurally locked in Independent Evaluator mode.")
+                # Primary Evaluator: labelling, plus the review card only once the
+                # card actually holds a full set of data.
+                if review_card_is_populated(transcript):
+                    tabs = st.tabs(["Data Labelling", "Primary Review Card"])
+                    tab1, tab2 = tabs
                 else:
+                    tabs = st.tabs(["Data Labelling"])
+                    tab1 = tabs[0]
+            
+            if tab1:
+                with tab1:
                     show_reasoning_state_definitions()
                     # Find the first unlabelled turn
                     labelled_turn_indices = {lbl.turn_id for lbl in transcript.faculty_labels if lbl.labeller_id == labeller_id}
@@ -281,7 +254,7 @@ else:
 
                             # Surface the underlying claim being probed so labellers aren't
                             # grading a question/response pair in a vacuum.
-                            source_claim = next((c for c in transcript.epistemic_map.claims if c.id == current_turn.claim_id), None)
+                            source_claim = resolve_claim_for_turn(transcript, current_turn)
 
                             main_col, side_col = st.columns([3, 2])
 
@@ -298,7 +271,7 @@ else:
 
                                 # Display dialog block (without scores to prevent bias)
                                 # Response source label
-                                source_emoji = "🧑" if current_turn.response_source.value == "Student" else "🤖" if current_turn.response_source.value == "Advocate" else "🔀"
+                                source_emoji = "🤖" if current_turn.response_source.value == "Advocate" else "🔀" if current_turn.response_source.value == "Hybrid" else "❔"
                                 source_label = f"{source_emoji} {current_turn.response_source.value}"
 
                                 st.markdown(f"""
@@ -313,6 +286,26 @@ else:
                                     <span class="system-badge">{current_turn.state.value}</span>
                                 </div>
                                 """, unsafe_allow_html=True)
+
+                                # Advocate draft vs submitted answer, when a draft was
+                                # generated for this turn. Previously the draft was
+                                # discarded the instant response_source was decided, so a
+                                # labeller had no way to see what the student actually
+                                # changed - only the Advocate/Hybrid/Unverified bucket.
+                                if current_turn.advocate_similarity is not None:
+                                    rewritten_pct = (1.0 - current_turn.advocate_similarity) * 100.0
+                                    with st.expander(
+                                        f"🤖 Advocate draft for this turn — {rewritten_pct:.0f}% rewritten",
+                                        expanded=False,
+                                    ):
+                                        st.markdown(f"**Draft offered:**\n\n> {current_turn.advocate_draft}")
+                                        st.markdown(f"**Submitted:**\n\n> {current_turn.student_response}")
+
+                                if current_turn.coherence_sts is not None:
+                                    st.caption(
+                                        f"Responsiveness to the question asked (not the claim): "
+                                        f"{current_turn.coherence_sts:.3f}"
+                                    )
 
                                 # Input controls for labelling
                                 agree = st.checkbox("I agree with the system classification", value=True)
@@ -375,8 +368,9 @@ else:
                     st.write("---")
                     st.write("### Faculty Agreement Dashboard")
                     
-                    total_labels = len(transcript.faculty_labels)
-                    agreed_labels = sum(1 for lbl in transcript.faculty_labels if lbl.agrees_with_system)
+                    my_labels = [lbl for lbl in transcript.faculty_labels if lbl.labeller_id == labeller_id]
+                    total_labels = len(my_labels)
+                    agreed_labels = sum(1 for lbl in my_labels if lbl.agrees_with_system)
                     agreement_rate = (agreed_labels / total_labels * 100) if total_labels > 0 else 100.0
                     
                     st.write(f"- **Total Labels Filed:** {total_labels}")
@@ -385,7 +379,7 @@ else:
                     # Export raw JSON data of labels
                     if st.checkbox("Show Flat JSON Export"):
                         flat_export = []
-                        for lbl in transcript.faculty_labels:
+                        for lbl in my_labels:
                             flat_export.append({
                                 "session_id": selected_session,
                                 "student_name": transcript.student_name,
@@ -397,76 +391,149 @@ else:
                             })
                         st.code(json.dumps(flat_export, indent=2), language="json")
 
-            with tab2:
-                if blind_mode:
-                    st.error("ACCESS DENIED: The Jury Review Card is structurally locked in Independent Evaluator mode.")
-                else:
+            if tab2:
+                with tab2:
                     # Review Card Rendering
                     rc = transcript.review_card
-                    if not rc:
-                        st.warning("Review Card is not available for this session. It has not been completed or Layer 2 scoring was disabled.")
-                    else:
-                        st.markdown('<div class="review-card-header"><h2>Jury Review Card</h2></div>', unsafe_allow_html=True)
-                        st.write(f"**Generated On:** {rc.created_at}")
+                    st.markdown('<div class="review-card-header"><h2>Primary Review Card</h2></div>', unsafe_allow_html=True)
+                    st.write(f"**Generated On:** {rc.created_at}")
                         
-                        # Dual-score rendering if Version A and B exist
-                        st.write("### Reasoning Foundation")
-                        version_a = getattr(rc, "version_a_composite", None)
-                        version_b = getattr(rc, "version_b_composite", None)
-                        if version_a is not None and version_b is not None:
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.metric(label="Version A (Heuristics) Score", value=f"{version_a:.2f}")
-                            with col2:
-                                st.metric(label="Version B (ML Model) Score", value=f"{version_b:.2f}")
-                        else:
-                            st.metric(label="Composite Confidence Score", value=f"{rc.composite_confidence:.2f}")
+                    # Dual-score rendering if Version A and B exist
+                    st.write("### Reasoning Foundation")
+                    version_a = getattr(rc, "version_a_composite", None)
+                    version_b = getattr(rc, "version_b_composite", None)
+                    if version_a is not None and version_b is not None:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric(label="Version A Grade", value=composite_to_letter_grade(version_a))
+                        with col2:
+                            st.metric(label="Version B Grade", value=composite_to_letter_grade(version_b))
+                    else:
+                        st.metric(label="Overall Grade", value=composite_to_letter_grade(rc.composite_confidence))
                             
-                        if rc.session_notes:
-                            st.write("---")
-                            st.write("### Session Notes")
-                            st.write(rc.session_notes)
-
-                        # Response source summary for faculty
-                        student_count = sum(1 for t in transcript.turns if t.response_source == ResponseSource.STUDENT)
-                        advocate_count = sum(1 for t in transcript.turns if t.response_source == ResponseSource.ADVOCATE)
-                        hybrid_count = sum(1 for t in transcript.turns if t.response_source == ResponseSource.HYBRID)
-                        total_turns = len(transcript.turns)
-
-                        if total_turns > 0:
-                            st.write("---")
-                            st.write("### Response Source Summary")
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("🧑 Student-Only", student_count, f"{student_count/total_turns*100:.0f}%")
-                            with col2:
-                                st.metric("🤖 AI-Suggested", advocate_count, f"{advocate_count/total_turns*100:.0f}%")
-                            with col3:
-                                st.metric("🔀 Hybrid/Edited", hybrid_count, f"{hybrid_count/total_turns*100:.0f}%")
-                            st.caption("Shows whether student answers were originally student-written, AI-suggested, or a combination.")
-
-                        if transcript.challenges:
-                            st.write("---")
-                            st.write("### Student Challenges")
-                            st.info("Turns where the student disputed the system's scoring decision.")
-                            for ch in transcript.challenges:
-                                with st.expander(f"Turn {ch.turn_index} - disputed as {ch.disputed_state.value}", expanded=False):
-                                    st.markdown(f"**System's justification at the time:** {ch.system_explanation}")
-                                    if ch.student_justification:
-                                        st.markdown(f"**Student's reasoning:** {ch.student_justification}")
-                                    else:
-                                        st.markdown("*Student did not provide additional reasoning.*")
-                                    st.caption(f"Challenged at {ch.challenged_at}")
-
+                    if rc.session_notes:
                         st.write("---")
-                        if st.button("Export Review Card JSON"):
-                            st.code(transcript.model_dump_json(include={'review_card', 'student_name', 'session_id'}), language="json")
+                        st.write("### Session Notes")
+                        st.write(rc.session_notes)
 
-            with tab3:
-                st.write("### Independent Blind Evaluation")
-                if not blind_mode:
-                    st.error("ACCESS DENIED: Please login as an Independent Evaluator to access blind evaluation.")
-                else:
+                    # Response source summary for faculty
+                    src_counts = response_source_counts(transcript)
+                    total_turns = src_counts["total"]
+
+                    if total_turns > 0:
+                        st.write("---")
+                        st.write("### Response Source Summary")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("❔ Unverified", src_counts["unverified"], f"{src_counts['unverified']/total_turns*100:.0f}%")
+                        with col2:
+                            st.metric("🤖 Advocate-Suggested", src_counts["advocate"], f"{src_counts['advocate']/total_turns*100:.0f}%")
+                        with col3:
+                            st.metric("🔀 Hybrid/Edited", src_counts["hybrid"], f"{src_counts['hybrid']/total_turns*100:.0f}%")
+
+                    # Intervention effort: how far each Advocate-assisted submission
+                    # diverged from the raw draft. The project's own design notes call
+                    # frequent, substantial intervention the richest evidence of tacit
+                    # understanding in the session - previously this was computed once
+                    # (to bucket the turn as Advocate/Hybrid/Unverified) and discarded,
+                    # so that evidence was never actually visible to faculty.
+                    effort = intervention_effort_summary(transcript)
+                    if effort["n"] > 0:
+                        st.write("---")
+                        st.write("### Intervention Effort (vs Advocate Draft)")
+                        st.caption(
+                            "Rewritten % = how much of the submitted answer differs from the "
+                            "raw Advocate suggestion for that turn. Higher means more "
+                            "independent editing; 0% means the draft was submitted unchanged."
+                        )
+                        st.metric("Mean Rewritten", f"{effort['mean_rewritten_pct']:.0f}%")
+                        for row in effort["rows"]:
+                            with st.expander(
+                                f"Turn {row['turn_index']} — {row['rewritten_pct']:.0f}% rewritten "
+                                f"({row['response_source']})",
+                                expanded=False,
+                            ):
+                                st.markdown(f"**Advocate draft:**\n\n> {row['draft']}")
+                                st.markdown(f"**Submitted:**\n\n> {row['submitted']}")
+
+                    # Responsiveness: did the answer address the QUESTION asked, not
+                    # just whether it happens to be entailed by the claim/document.
+                    # coherence_nli is weighted 0 in the composite precisely because it
+                    # rewarded restating the claim over engaging the question, so this
+                    # is the composite's only question-facing signal and is otherwise
+                    # invisible - a well-targeted answer can score no differently from
+                    # one that ignored the question, unless this is shown separately.
+                    resp = responsiveness_summary(transcript)
+                    if resp["mean"] is not None:
+                        st.write("---")
+                        st.write("### Responsiveness to Questions Asked")
+                        st.caption(
+                            "Semantic similarity between each answer and the question it "
+                            "was answering (not the claim or documentation). Low values here "
+                            "alongside a low composite usually mean the answer went somewhere "
+                            "the assessor did not ask; high values alongside a low composite "
+                            "usually mean the answer engaged the question but the system could "
+                            "not verify it against the documentation."
+                        )
+                        st.metric("Mean Responsiveness", f"{resp['mean']:.3f}")
+
+                    if transcript.challenges:
+                        st.write("---")
+                        st.write("### Student Challenges")
+                        st.info("Turns where the student disputed the system's scoring decision.")
+                        for ch in transcript.challenges:
+                            with st.expander(f"Turn {ch.turn_index} - disputed as {ch.disputed_state.value}", expanded=False):
+                                st.markdown(f"**System's justification at the time:** {ch.system_explanation}")
+                                if ch.student_justification:
+                                    st.markdown(f"**Student's reasoning:** {ch.student_justification}")
+                                else:
+                                    st.markdown("*Student did not provide additional reasoning.*")
+                                st.caption(f"Challenged at {ch.challenged_at}")
+
+                    # Per-criterion rubric support. Computed every turn and stored,
+                    # but never surfaced until now - an examiner gets far more from
+                    # "weak on evidence, strong on ownership" than from one composite.
+                    criterion_rows = rubric_criterion_means(transcript)
+                    if criterion_rows:
+                        st.write("---")
+                        st.write("### Rubric Criterion Breakdown")
+                        for row in criterion_rows:
+                            st.write(f"**{row['id'].capitalize()}** — {row['mean']:.3f}")
+                            st.progress(min(max(row["mean"], 0.0), 1.0))
+                    else:
+                        st.write("---")
+                        st.caption(
+                            "No per-criterion rubric scores recorded — this session predates "
+                            "per-criterion scoring."
+                        )
+
+                    # Turns whose answer diverged most from the student's own
+                    # documentation. Only meaningful with the cross-encoder backend:
+                    # the previous head could not distinguish contradiction from
+                    # simply being about a different topic.
+                    flagged = contradiction_flags(transcript)
+                    if flagged:
+                        st.write("---")
+                        st.write("### Possible Contradictions With the Documentation")
+                        for t in flagged:
+                            with st.expander(
+                                f"Turn {t.turn_index} — contradiction signal {t.contradiction_signal:.3f}",
+                                expanded=False,
+                            ):
+                                st.markdown(f"**Student said:** {t.student_response}")
+                                if t.contradicted_sentence:
+                                    st.markdown(
+                                        f"**Most relevant line in their documentation:** "
+                                        f"*{t.contradicted_sentence}*"
+                                    )
+
+                    st.write("---")
+                    if st.button("Export Review Card JSON"):
+                        st.code(transcript.model_dump_json(include={'review_card', 'student_name', 'session_id'}), language="json")
+
+            if tab3:
+                with tab3:
+                    st.write("### Independent Blind Evaluation")
                     show_reasoning_state_definitions()
                     st.write("Review the raw transcript below and submit your independent evaluation.")
                     for t in transcript.turns:
@@ -483,20 +550,24 @@ else:
                     
                     if existing_rating:
                         st.success(f"You submitted a '{existing_rating.judgement}' rating for this session.")
-                        
-                        st.write("#### Comparison Matrix")
-                        # Calculate alignment rate: AI collapsed states vs Evaluator judgements
-                        sys_collapsed = any(t.state == StudentState.COLLAPSED for t in transcript.turns)
-                        hum_collapsed = existing_rating.judgement == "Collapsed"
-                        
-                        alignment = "Aligned" if sys_collapsed == hum_collapsed else "Misaligned"
-                        st.metric("System/Human Alignment", alignment)
-                        
-                        st.write(f"**System flagged collapse?** {sys_collapsed}")
-                        st.write(f"**You flagged collapse?** {hum_collapsed}")
-                        
-                        if not (sys_collapsed == hum_collapsed):
-                            st.warning("Disagreement Flagged: Qualitative review required for methodology chapter.")
+
+                        # Only surface the comparison once the rating and the
+                        # session it is compared against are both complete - a
+                        # partial rating produces a meaningless alignment verdict.
+                        if evaluator_rating_is_populated(existing_rating) and transcript.turns:
+                            st.write("#### Comparison Matrix")
+                            # Calculate alignment rate: AI collapsed states vs Evaluator judgements
+                            sys_collapsed = any(t.state == StudentState.COLLAPSED for t in transcript.turns)
+                            hum_collapsed = existing_rating.judgement == "Collapsed"
+
+                            alignment = "Aligned" if sys_collapsed == hum_collapsed else "Misaligned"
+                            st.metric("System/Human Alignment", alignment)
+
+                            st.write(f"**System flagged collapse?** {sys_collapsed}")
+                            st.write(f"**You flagged collapse?** {hum_collapsed}")
+
+                            if not (sys_collapsed == hum_collapsed):
+                                st.warning("Disagreement Flagged: Qualitative review required for methodology chapter.")
                     else:
                         if st.button("Submit Blind Evaluation"):
                             rating = EvaluatorRating(
@@ -512,17 +583,13 @@ else:
                             st.success("Evaluation submitted!")
                             st.rerun()
 
-            with tab4:
-                st.write("### Faculty Experiment Rating (Double-Blind)")
-                if blind_mode:
-                    st.error("ACCESS DENIED: Experiment Rating is structurally locked in Independent Evaluator mode.")
-                else:
-                    st.markdown("Evaluate the Socratic AI's qualitative performance and provide a Ground Truth grade to calibrate the orchestration parameters.")
+            if tab4:
+                with tab4:
+                    st.write("### Faculty Experiment Rating (Double-Blind)")
+                    st.markdown("Evaluate the system's qualitative performance and provide a Ground Truth grade to calibrate the orchestration parameters.")
 
                     if transcript.experiment_profile:
                         st.success("🔒 Experimental Profile Assigned (Blind - profile name hidden from faculty)")
-                    else:
-                        st.warning("No experimental profile attached to this session.")
 
                     rubric_default = """| Score Range | Grade | Description |
 |---|---|---|
@@ -537,7 +604,7 @@ else:
                     else:
                         for idx, turn in enumerate(transcript.turns):
                             with st.expander(f"Turn {idx+1} - Claim: {turn.claim_id}", expanded=False):
-                                source_claim = next((c for c in transcript.epistemic_map.claims if c.id == turn.claim_id), None)
+                                source_claim = resolve_claim_for_turn(transcript, turn)
                                 if source_claim:
                                     st.markdown(f"**Claim Under Test:** \"{source_claim.text}\"")
                                     st.markdown(f"*Source document context:* \"{source_claim.source_passage}\"")
@@ -547,20 +614,29 @@ else:
 
                                 st.markdown(f"**Assessor Question:** {turn.question}")
                                 # Response source label for faculty
-                                source_emoji = "🧑" if turn.response_source.value == "Student" else "🤖" if turn.response_source.value == "Advocate" else "🔀"
+                                source_emoji = "🤖" if turn.response_source.value == "Advocate" else "🔀" if turn.response_source.value == "Hybrid" else "❔"
                                 source_label = f"{source_emoji} {turn.response_source.value}"
                                 st.markdown(f"**Student Response:** <small>{source_label}</small>  \n{turn.student_response}", unsafe_allow_html=True)
 
+                                if turn.advocate_similarity is not None:
+                                    rewritten_pct = (1.0 - turn.advocate_similarity) * 100.0
+                                    with st.expander(
+                                        f"🤖 In-app suggestion offered for this turn — {rewritten_pct:.0f}% rewritten",
+                                        expanded=False,
+                                    ):
+                                        st.markdown(f"**Suggestion offered:**\n\n> {turn.advocate_draft}")
+                                        st.markdown(f"**Submitted:**\n\n> {turn.student_response}")
+
                                 st.markdown("#### Faculty Evaluation")
 
-                                existing_rating = next((r for r in transcript.experiment_ratings if r.turn_index == idx), None)
+                                existing_rating = next((r for r in transcript.experiment_ratings if r.turn_index == idx and r.faculty_id == labeller_id), None)
 
                                 if existing_rating:
                                     st.success(f"Rated by {existing_rating.faculty_id} at {existing_rating.rated_at}")
                                     st.json(existing_rating.model_dump())
                                 else:
                                     with st.form(key=f"exp_rating_form_{idx}"):
-                                        st.markdown("##### 1. AI Dialogue Quality")
+                                        st.markdown("##### 1. Dialogue Quality")
                                         assessor_halluc = st.toggle("Assessor Hallucination (Did it hallucinate facts?)", value=False, key=f"exp_h_{idx}")
                                         assessor_rep = st.toggle("Assessor Repetition (Did it exactly repeat a previous question?)", value=False, key=f"exp_r_{idx}")
 
@@ -568,11 +644,14 @@ else:
                                         st.info(f"The Evaluator's raw variance score was: {turn.variance_score:.2f}")
                                         eval_var = st.toggle("Did the Variance score correctly reflect the ambiguity?", value=True, key=f"exp_v_{idx}")
 
-                                        st.markdown("##### 3. Advocate Quality (if applicable)")
+                                        st.markdown("##### 3. Expert Alignment")
+                                        expert_align = st.toggle("Did the system's response align with expert pedagogical expectations?", value=True, key=f"exp_ea_{idx}")
+
+                                        st.markdown("##### 4. Advocate Quality (if applicable)")
                                         adv_nov = st.toggle("Advocate Pivot Novelty (Was the pivot creative/novel?)", value=True, key=f"exp_an_{idx}")
                                         adv_rel = st.toggle("Advocate Pivot Relevance (Was the pivot relevant?)", value=True, key=f"exp_ar_{idx}")
 
-                                        st.markdown("##### 4. Faculty Overall Grade")
+                                        st.markdown("##### 5. Faculty Overall Grade")
                                         st.markdown("**Reference Rubric:**")
                                         st.markdown(rubric_default)
 
@@ -598,6 +677,7 @@ else:
                                                 assessor_hallucination=assessor_halluc,
                                                 assessor_repetition=assessor_rep,
                                                 evaluator_variance_accurate=eval_var,
+                                                expert_alignment=expert_align,
                                                 advocate_novel=adv_nov,
                                                 advocate_relevant=adv_rel,
                                                 ground_truth_score=ground_truth,
