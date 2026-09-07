@@ -135,7 +135,7 @@ elif st.session_state.epistemic_map is None:
                     )
                     st.success(f"Loaded brief from {brief_file.name}")
                 except Exception as e:
-                    st.error(f"Could not read brief: {e}")
+                    st.error("Something went wrong.")
             st.session_state.assignment_brief = st.text_area(
                 "Or paste the brief here:",
                 value=st.session_state.get("assignment_brief", ""),
@@ -244,7 +244,7 @@ elif st.session_state.epistemic_map is None:
                     st.success("PDF parsed and Epistemic Map successfully created!")
                     st.rerun()
             except Exception as e:
-                st.error(f"Error parsing PDF: {e}")
+                st.error("Something went wrong.")
 
 # ==========================================
 # SCREEN 3: Socratic Probing Session
@@ -266,7 +266,7 @@ else:
         st.session_state.debug_mode = st.toggle("🐛 Debug Mode (show scores & badges)", value=st.session_state.debug_mode)
 
         # Pause
-        if st.button("Pause Session", use_container_width=True):
+        if st.button("Pause Session"):
             turn, msg = manager.submit_response("[Intervention: Paused]", InterventionType.PAUSE)
             st.session_state.last_turn_result = turn
             st.session_state.next_prompt = msg
@@ -281,7 +281,7 @@ else:
             st.info("Session paused.")
             
         # Exit and Save
-        if st.button("Save & Exit Session", use_container_width=True, type="primary"):
+        if st.button("Save & Exit Session", type="primary"):
             # End-of-session auditor pass. Runs ONCE here, never in the per-turn
             # checkpoint autosave below, so the API is called a handful of times per
             # viva rather than a handful of times per turn. If it fails or no key is
@@ -463,7 +463,7 @@ else:
                 advocate_disabled = st.session_state.get("advocate_was_generated", False)
                 button_label = "✓ Advocate Suggestion Ready" if advocate_disabled else "Generate Brainstorming Suggestions"
 
-                if st.button(button_label, type="secondary", use_container_width=True, disabled=advocate_disabled):
+                if st.button(button_label, type="secondary", disabled=advocate_disabled):
                     with st.spinner("Generating rough brainstorming suggestions..."):
                         suggestion, pivot_dim = VivaWrapper.get_advocate_defense(
                             claim=active_claim,
@@ -497,7 +497,7 @@ else:
                 if st.button(
                     "Submit Rationale to Assessor",
                     type="primary",
-                    use_container_width=True,
+                    
                     disabled=submit_disabled
                 ):
                     if not response_input_text.strip():
@@ -560,13 +560,13 @@ else:
                         st.rerun()  # Immediately show next question
 
             with col_b2:
-                if st.button("Challenge Score Decision", use_container_width=True, disabled=(not manager.turns)):
+                if st.button("Challenge Score Decision", disabled=(not manager.turns)):
                     st.session_state.show_challenge = True
                     st.session_state.challenge_response = manager.handle_challenge()
                     st.rerun()
 
             with col_b3:
-                if st.button("❓ Clarify Question", use_container_width=True, disabled=(not st.session_state.next_prompt)):
+                if st.button("❓ Clarify Question", disabled=(not st.session_state.next_prompt)):
                     st.session_state.show_clarification = True
                     st.rerun()
 
@@ -587,7 +587,7 @@ else:
 
             If you remain unsure, document what you're uncertain about in your response.
             """)
-            if st.button("Got it, ready to answer", use_container_width=True):
+            if st.button("Got it, ready to answer"):
                 st.session_state.show_clarification = False
                 st.rerun()
 
@@ -662,7 +662,7 @@ else:
 
             col1, col2 = st.columns([0.05, 0.95])
             with col1:
-                if st.button("▼" if st.session_state.pdf_pane_open else "▶", key="pdf_toggle", use_container_width=True):
+                if st.button("▼" if st.session_state.pdf_pane_open else "▶", key="pdf_toggle"):
                     st.session_state.pdf_pane_open = not st.session_state.pdf_pane_open
                     st.rerun()
             with col2:
@@ -680,13 +680,13 @@ else:
                         )
                         if image_bytes:
                             with st.container(height=600):
-                                st.image(image_bytes, caption=f"Extracted from {manager.epistemic_map.document_name} (Physical Page {active_claim.page})", use_container_width=True)
+                                st.image(image_bytes, caption=f"Extracted from {manager.epistemic_map.document_name} (Physical Page {active_claim.page})")
                             st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel and return to full dialogue view.")
                         else:
                             st.info("Could not visually locate the text on the page. Displaying extracted text block instead.")
                             st.markdown(f"> *{active_claim.source_passage}*")
                             st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel.")
                     except Exception as e:
-                        st.error(f"Error loading PDF preview: {e}")
+                        st.error("Something went wrong.")
                 else:
                     st.warning(f"Source PDF '{manager.epistemic_map.document_name}' not found in the project root directory. Context pane unavailable.")

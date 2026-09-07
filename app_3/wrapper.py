@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict, Any
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 
 # Ensure project root is on path
 sys.path.append(str(Path(__file__).resolve().parent.parent))

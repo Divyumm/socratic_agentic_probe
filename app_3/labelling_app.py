@@ -85,12 +85,12 @@ def render_source_pane(document_name: str, claim) -> None:
             search_text=claim.text
         )
         if image_bytes:
-            st.image(image_bytes, caption=f"{document_name} — Page {claim.page}", use_container_width=True)
+            st.image(image_bytes, caption=f"{document_name} — Page {claim.page}")
         else:
             st.info("Could not visually locate the claim text on the page. Showing extracted passage instead.")
             st.markdown(f"> *{claim.source_passage}*")
     except Exception as e:
-        st.error(f"Error loading PDF preview: {e}")
+        st.error("Something went wrong.")
         st.markdown(f"> *{claim.source_passage}*")
 
 
@@ -133,7 +133,7 @@ with col_role:
 with col_labeller:
     labeller_id = st.text_input("Evaluator ID:", value="Evaluator_A").strip()
 with col_change:
-    if st.button("🔄 Change & Restart", use_container_width=True):
+    if st.button("🔄 Change & Restart"):
         st.session_state.turn_step = None
         st.session_state.current_session_id = None
         st.rerun()
@@ -322,19 +322,19 @@ else:
                                 # Navigation controls
                                 nav_col1, nav_col2, nav_col3, nav_col4 = st.columns([1, 1, 1, 1])
                                 with nav_col1:
-                                    if st.button("⬅ Previous Turn", use_container_width=True, disabled=(step == 0)):
+                                    if st.button("⬅ Previous Turn", disabled=(step == 0)):
                                         st.session_state.turn_step = max(0, step - 1)
                                         st.rerun()
                                 with nav_col2:
                                     # Jump to specific turn
                                     jump_to = st.number_input("Jump to turn:", min_value=1, max_value=len(turns_to_label), value=step + 1, step=1)
-                                    if st.button("Go", use_container_width=True):
+                                    if st.button("Go"):
                                         st.session_state.turn_step = jump_to - 1
                                         st.rerun()
                                 with nav_col3:
                                     st.markdown("")  # Spacer
                                 with nav_col4:
-                                    if st.button("Save Label & Next ➡", use_container_width=True, type="primary"):
+                                    if st.button("Save Label & Next ➡", type="primary"):
                                         # Create label
                                         label = FacultyLabel(
                                             turn_id=str(current_turn.id),
