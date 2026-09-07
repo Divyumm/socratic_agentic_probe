@@ -369,20 +369,7 @@ else:
                     st.write(f"- **Total Labels Filed:** {total_labels}")
                     st.write(f"- **Human-System Agreement Rate:** {agreement_rate:.1f}%")
                     
-                    # Export raw JSON data of labels
-                    if st.checkbox("Show Flat JSON Export"):
-                        flat_export = []
-                        for lbl in my_labels:
-                            flat_export.append({
-                                "session_id": selected_session,
-                                "student_name": transcript.student_name,
-                                "turn_id": lbl.turn_id,
-                                "labeller_id": lbl.labeller_id,
-                                "agrees": lbl.agrees_with_system,
-                                "corrected_state": lbl.corrected_state.value if lbl.corrected_state else None,
-                                "note": lbl.note
-                            })
-                        st.code(json.dumps(flat_export, indent=2), language="json")
+
 
             if tab2:
                 with tab2:
