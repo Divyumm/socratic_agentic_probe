@@ -292,14 +292,7 @@ else:
                                 # discarded the instant response_source was decided, so a
                                 # labeller had no way to see what the student actually
                                 # changed - only the Advocate/Hybrid/Unverified bucket.
-                                if current_turn.advocate_similarity is not None:
-                                    rewritten_pct = (1.0 - current_turn.advocate_similarity) * 100.0
-                                    with st.expander(
-                                        f"🤖 Advocate draft for this turn — {rewritten_pct:.0f}% rewritten",
-                                        expanded=False,
-                                    ):
-                                        st.markdown(f"**Draft offered:**\n\n> {current_turn.advocate_draft}")
-                                        st.markdown(f"**Submitted:**\n\n> {current_turn.student_response}")
+
 
                                 if current_turn.coherence_sts is not None:
                                     st.caption(

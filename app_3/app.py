@@ -257,7 +257,8 @@ else:
         st.warning(st.session_state.fallback_warning)
 
     # ------------------------------------------
-    with st.sidebar:
+    col_main, col_right = st.columns([3, 1], gap="large")
+    with col_right:
         st.header("Session Controls")
 
         # Debug mode toggle
@@ -342,339 +343,340 @@ else:
             st.rerun()
 
     # ------------------------------------------
-    # MAIN AREA: Interactive Socratic Dialogue
-    # ------------------------------------------
+    with col_main:
+        # MAIN AREA: Interactive Socratic Dialogue
+        # ------------------------------------------
     
-    # Active Claim card
-    if active_claim:
-        if not manager.turns:
-            state_label = "AWAITING RESPONSE"
-            badge_class = "badge-paused"
-        else:
-            state_label = manager.session_state.value.upper()
-            badge_class = "badge-grounded"
-            if manager.session_state == StudentState.UNSTABLE:
-                badge_class = "badge-unstable"
-            elif manager.session_state == StudentState.COLLAPSED:
-                badge_class = "badge-collapsed"
-            elif manager.session_state == StudentState.PAUSED:
+        # Active Claim card
+        if active_claim:
+            if not manager.turns:
+                state_label = "AWAITING RESPONSE"
                 badge_class = "badge-paused"
-
-        # Clean fallback claims prefix
-        import re
-        clean_text = re.sub(r"^Fallback extracted claim \([^)]+\):\s*", "", active_claim.text)
-        clean_text = html.escape(clean_text)
-
-        # Translate dimension to friendly student mask
-        dim_label = "Dynamic Theme" if active_claim.dimension == PapanekDimension.EMERGENT else "Design Aspect"
-        if active_claim.dimension == PapanekDimension.EMERGENT:
-            # emergent_theme is Optional - the LLM doesn't always populate it
-            # despite being instructed to, so fall back rather than crash.
-            dim_val = active_claim.emergent_theme or "the situational context of your work"
-        else:
-            dim_val = manager.teleprompter.DIMENSION_MASK_MAP.get(active_claim.dimension, active_claim.dimension.value)
-        dim_val = html.escape(dim_val)
-
-        # Truncate source passage for the quick preview card
-        preview_context = active_claim.source_passage
-        if len(preview_context) > 120:
-            preview_context = preview_context[:120] + "..."
-
-        st.markdown(f"""
-        <div class="glass-card claim-card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <span style="font-weight: 700; font-size: 1.1rem; color: #a78bfa;">ACTIVE CLAIM: {html.escape(active_claim.id)}</span>
-                <span class="badge {badge_class}">{state_label}</span>
-            </div>
-            <p style="font-size: 1rem; color: #e6e8eb; margin-bottom: 8px;"><b>Extracted Claim:</b> "{clean_text}"</p>
-            <div style="display: flex; gap: 20px; font-size: 0.85rem; color: #9aa3ae;">
-                <span><b>{dim_label}:</b> {dim_val}</span>
-                <span><b>Probing Depth:</b> {manager.active_depth} / 3</span>
-                <span><b>Vulnerability Rank:</b> {active_claim.vulnerability_rank}</span>
-                <span><b>Source Page:</b> PDF Page {active_claim.page} (Physical)</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class="glass-card">
-            <h4>All Claims Justified!</h4>
-            <p>Congratulations, your reasoning stood strong across all design claims and dimensions.</p>
-        """, unsafe_allow_html=True)
-
-    # Chat Log & Metrics display (full width, scrolls together)
-    with st.container():
-        st.subheader("Questions")
-        
-        # Display past turns in chat bubbles
-        for turn in manager.turns:
-            if turn.intervention_type == InterventionType.PAUSE:
-                st.markdown('<div class="chat-bubble student-bubble" style="background-color: #1c2129; border-color: #454d5a;">[System Action: Session Paused]</div>', unsafe_allow_html=True)
-                continue
-            
-            # Find the dimension of the claim at that turn for accurate translation
-            turn_claim = next((c for c in manager.epistemic_map.claims if c.id == turn.claim_id), None)
-            turn_dim = turn_claim.dimension if turn_claim else PapanekDimension.NEED
-            turn_theme = turn_claim.emergent_theme if turn_claim else None
-            translated_question = manager.teleprompter.translate_prompt_v2(turn.question, turn.state, manager.epistemic_map.get_claim(turn.claim_id) if manager.epistemic_map else None)
-
-            st.markdown(f'<div class="chat-bubble assessor-bubble"><b>Assessor (Turn {turn.turn_index}):</b> {html.escape(translated_question)}</div>', unsafe_allow_html=True)
-
-            # Response with source label and badges
-            col_resp_label, col_resp_badges = st.columns([3, 1])
-            with col_resp_label:
-                source_emoji = "🧑" if turn.response_source.value == "Student" else "🤖" if turn.response_source.value == "Advocate" else "🔀"
-                st.markdown(f'<div class="chat-bubble student-bubble"><b>Student:</b> {html.escape(turn.student_response)} <small>[{source_emoji} {turn.response_source.value}]</small></div>', unsafe_allow_html=True)
-
-
-
-            if turn.reconstruction_dimension:
-                masked_recon = html.escape(manager.teleprompter.DIMENSION_MASK_MAP.get(turn.reconstruction_dimension, turn.reconstruction_dimension.value))
-                st.markdown(f'<div class="chat-bubble advocate-hint-bubble"><small>→ Pivot to {masked_recon}</small></div>', unsafe_allow_html=True)
-
-        # Active turn Socratic question
-        if active_claim:
-            st.markdown(f'<div class="chat-bubble assessor-bubble"><b>Assessor (Current Probing):</b> {html.escape(st.session_state.next_prompt)}</div>', unsafe_allow_html=True)
-
-        st.markdown("---")
-        
-        # ------------------------------------------
-        # STUDENT INPUT & ADVOCATE CO-CREATION HUB
-        # ------------------------------------------
-        st.subheader("Your Justification Hub")
-
-        # Advocate Helper Section (one-time only per question)
-        if active_claim:
-            adv_col1, adv_col2 = st.columns([2, 1])
-            with adv_col2:
-                # Disable button if advocate was already generated for this question
-                advocate_disabled = st.session_state.get("advocate_was_generated", False)
-                button_label = "✓ Advocate Suggestion Ready" if advocate_disabled else "Generate Brainstorming Suggestions"
-
-                if st.button(button_label, type="secondary", disabled=advocate_disabled):
-                    with st.spinner("Generating rough brainstorming suggestions..."):
-                        suggestion, pivot_dim = VivaWrapper.get_advocate_defense(
-                            claim=active_claim,
-                            question=st.session_state.next_prompt,
-                            depth=manager.active_depth,
-                            advocate_temp=manager.experiment_profile.advocate_temp if manager.experiment_profile else None
-                        )
-                        st.session_state.advocate_suggestion = suggestion
-                        st.session_state.advocate_pivot = pivot_dim
-                        st.session_state.advocate_was_generated = True  # Flag that advocate was used (disables button)
-                        st.session_state.response_input = suggestion # Pre-populate student answer box
-                        st.session_state.student_resp_key = suggestion # Bind directly to text area key to force refresh
-                        st.rerun()  # Refresh immediately to show disabled button and suggestions
-
-            # The advocate suggestion text is pre-populated in the text area below.
-            # Student response submission form
-            response_input_text = st.text_area(
-                "Write or co-create your justification (edit the template below):", 
-                key="student_resp_key",
-                height=300
-            )
-            
-            # Synchronize input to state
-            st.session_state.response_input = response_input_text
-            
-            col_b1, col_b2, col_b3 = st.columns([2, 1, 1])
-            with col_b1:
-                # Disable button if response already submitted (wait state)
-                submit_disabled = st.session_state.get("response_submitted_waiting", False)
-
-                if st.button(
-                    "Submit Rationale to Assessor",
-                    type="primary",
-                    
-                    disabled=submit_disabled
-                ):
-                    if not response_input_text.strip():
-                        st.error("⚠️ Please enter a response before submitting.")
-                    else:
-                        # Mark as submitted to disable button during processing
-                        st.session_state.response_submitted_waiting = True
-
-                        # Show processing status
-                        with st.status("Processing your response...", expanded=True) as status:
-                            status.update(label="📝 Received your response", state="running")
-
-                            # Compute features and scores (this takes a few seconds)
-                            turn, next_prompt = manager.submit_response(
-                                response=response_input_text
-                            )
-
-                            status.update(label="✅ Response fully evaluated", state="complete")
-
-                        # Provenance is only observable RELATIVE TO THE ADVOCATE. If no
-                        # Advocate draft was generated there is nothing to compare against,
-                        # so the turn stays UNVERIFIED rather than claiming it was student
-                        # written - the system cannot see whether the text came from the
-                        # student, an external model, or anywhere else.
-                        if st.session_state.advocate_was_generated:
-                            similarity = SequenceMatcher(None, response_input_text.lower(), st.session_state.advocate_suggestion.lower()).ratio()
-                            # Record the draft and the divergence, not just the bucket it
-                            # falls into. This is the "intervention log" the design calls
-                            # the richest data source in the session - it was computed and
-                            # then discarded every single turn until now.
-                            turn.advocate_draft = st.session_state.advocate_suggestion
-                            turn.advocate_similarity = round(similarity, 4)
-                            if similarity >= 0.85:
-                                turn.response_source = ResponseSource.ADVOCATE
-                            elif similarity >= 0.50:
-                                turn.response_source = ResponseSource.HYBRID
-                            else:
-                                turn.response_source = ResponseSource.UNVERIFIED
-
-                        st.session_state.last_turn_result = turn
-                        st.session_state.next_prompt = next_prompt
-
-                        # Auto-save checkpoint after each turn
-                        checkpoint_transcript = manager.build_transcript(notes=f"Auto-save checkpoint. Participant ID: {st.session_state.participant_id}")
-                        checkpoint_path = BASE_DIR / "data" / "processed" / f"checkpoint_{manager.session_id}.json"
-                        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(checkpoint_path, "w", encoding="utf-8") as f:
-                            f.write(checkpoint_transcript.model_dump_json(indent=2))
-
-                        # Reset helper variables for next question
-                        st.session_state.advocate_suggestion = ""
-                        st.session_state.advocate_pivot = None
-                        st.session_state.advocate_was_generated = False
-                        st.session_state.response_input = ""
-                        st.session_state.clear_text_area = True
-                        st.session_state.show_challenge = False
-                        st.session_state.response_submitted_waiting = False  # Re-enable button
-
-                        st.success("✅ Your response has been recorded and evaluated. Loading next question...")
-                        st.rerun()  # Immediately show next question
-
-            with col_b2:
-                if st.button("Challenge Score Decision", disabled=(not manager.turns)):
-                    st.session_state.show_challenge = True
-                    st.session_state.challenge_response = manager.handle_challenge()
-                    st.rerun()
-
-            with col_b3:
-                if st.button("❓ Clarify Question", disabled=(not st.session_state.next_prompt)):
-                    st.session_state.show_clarification = True
-                    st.rerun()
-
-        # Clarification request dialog
-        if st.session_state.get("show_clarification", False) and st.session_state.next_prompt:
-            st.info("""
-            **Question Clarification:**
-
-            The question above is asking you to:
-            1. **Explain your reasoning** for the specific design choice
-            2. **Ground your answer** in the original document or design principles
-            3. **Show how** this claim connects to the broader context of your project
-
-            If you're still uncertain, you can:
-            - Re-read the claim and question carefully
-            - Use the "Generate Advocate Defense Helper" to see alternative angles
-            - Take a moment to think, then try rewording your answer
-
-            If you remain unsure, document what you're uncertain about in your response.
-            """)
-            if st.button("Got it, ready to answer"):
-                st.session_state.show_clarification = False
-                st.rerun()
-
-        st.markdown("---")
-
-        # ------------------------------------------
-        # METRICS DISPLAY PANEL (Debug Mode Only)
-        # ------------------------------------------
-        if st.session_state.debug_mode:
-            st.subheader("Real-Time Reasoning Signals")
-
-            last_turn = st.session_state.last_turn_result
-            if last_turn:
-                st.markdown(f"#### Evaluation for Turn {last_turn.turn_index}")
-
-                m_col1, m_col2 = st.columns(2)
-                with m_col1:
-                    st.markdown(f"""
-                    <div class="glass-card" style="text-align: center;">
-                        <div class="metric-value">{last_turn.coherence_score:.2f}</div>
-                        <div class="metric-label">Coherence</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                with m_col2:
-                    st.markdown(f"""
-                    <div class="glass-card" style="text-align: center;">
-                        <div class="metric-value">{last_turn.grounding_score:.2f}</div>
-                        <div class="metric-label">Grounding</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-
-                # Composite Confidence Score gauge
-                st.markdown(f"""
-                <div class="glass-card" style="text-align: center; border-color: rgba(139, 92, 246, 0.4);">
-                    <div class="metric-value" style="font-size: 2.5rem; color: #a78bfa;">{last_turn.composite_confidence:.2f}</div>
-                    <div class="metric-label" style="font-weight: 600;">COMPOSITE CONFIDENCE SCORE</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-
             else:
-                st.info("Submit your first response to see the real-time reasoning metrics dashboard.")
+                state_label = manager.session_state.value.upper()
+                badge_class = "badge-grounded"
+                if manager.session_state == StudentState.UNSTABLE:
+                    badge_class = "badge-unstable"
+                elif manager.session_state == StudentState.COLLAPSED:
+                    badge_class = "badge-collapsed"
+                elif manager.session_state == StudentState.PAUSED:
+                    badge_class = "badge-paused"
+
+            # Clean fallback claims prefix
+            import re
+            clean_text = re.sub(r"^Fallback extracted claim \([^)]+\):\s*", "", active_claim.text)
+            clean_text = html.escape(clean_text)
+
+            # Translate dimension to friendly student mask
+            dim_label = "Dynamic Theme" if active_claim.dimension == PapanekDimension.EMERGENT else "Design Aspect"
+            if active_claim.dimension == PapanekDimension.EMERGENT:
+                # emergent_theme is Optional - the LLM doesn't always populate it
+                # despite being instructed to, so fall back rather than crash.
+                dim_val = active_claim.emergent_theme or "the situational context of your work"
+            else:
+                dim_val = manager.teleprompter.DIMENSION_MASK_MAP.get(active_claim.dimension, active_claim.dimension.value)
+            dim_val = html.escape(dim_val)
+
+            # Truncate source passage for the quick preview card
+            preview_context = active_claim.source_passage
+            if len(preview_context) > 120:
+                preview_context = preview_context[:120] + "..."
+
+            st.markdown(f"""
+            <div class="glass-card claim-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-weight: 700; font-size: 1.1rem; color: #a78bfa;">ACTIVE CLAIM: {html.escape(active_claim.id)}</span>
+                    <span class="badge {badge_class}">{state_label}</span>
+                </div>
+                <p style="font-size: 1rem; color: #e6e8eb; margin-bottom: 8px;"><b>Extracted Claim:</b> "{clean_text}"</p>
+                <div style="display: flex; gap: 20px; font-size: 0.85rem; color: #9aa3ae;">
+                    <span><b>{dim_label}:</b> {dim_val}</span>
+                    <span><b>Probing Depth:</b> {manager.active_depth} / 3</span>
+                    <span><b>Vulnerability Rank:</b> {active_claim.vulnerability_rank}</span>
+                    <span><b>Source Page:</b> PDF Page {active_claim.page} (Physical)</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            st.info("💡 Enable Debug Mode in Session Controls (sidebar) to see real-time reasoning signals.")
+            st.markdown("""
+            <div class="glass-card">
+                <h4>All Claims Justified!</h4>
+                <p>Congratulations, your reasoning stood strong across all design claims and dimensions.</p>
+            """, unsafe_allow_html=True)
+
+        # Chat Log & Metrics display (full width, scrolls together)
+        with st.container():
+            st.subheader("Questions")
+        
+            # Display past turns in chat bubbles
+            for turn in manager.turns:
+                if turn.intervention_type == InterventionType.PAUSE:
+                    st.markdown('<div class="chat-bubble student-bubble" style="background-color: #1c2129; border-color: #454d5a;">[System Action: Session Paused]</div>', unsafe_allow_html=True)
+                    continue
             
-        # Display the explanation challenge context
-        if st.session_state.show_challenge:
-            st.markdown("---")
-            st.subheader("Challenge This Score")
-            st.write(st.session_state.challenge_response)
+                # Find the dimension of the claim at that turn for accurate translation
+                turn_claim = next((c for c in manager.epistemic_map.claims if c.id == turn.claim_id), None)
+                turn_dim = turn_claim.dimension if turn_claim else PapanekDimension.NEED
+                turn_theme = turn_claim.emergent_theme if turn_claim else None
+                translated_question = manager.teleprompter.translate_prompt_v2(turn.question, turn.state, manager.epistemic_map.get_claim(turn.claim_id) if manager.epistemic_map else None)
 
-            challenge_justification = st.text_input(
-                "Optional: explain your reasoning for disputing this score (faculty will see this):",
-                placeholder="My response is grounded because... (leave blank if you'd rather not add anything)"
-            )
-            if st.button("Submit Challenge"):
-                manager.record_challenge(
-                    justification=challenge_justification,
+                st.markdown(f'<div class="chat-bubble assessor-bubble"><b>Assessor (Turn {turn.turn_index}):</b> {html.escape(translated_question)}</div>', unsafe_allow_html=True)
+
+                # Response with source label and badges
+                col_resp_label, col_resp_badges = st.columns([3, 1])
+                with col_resp_label:
+                    source_emoji = "🧑" if turn.response_source.value == "Student" else "🤖" if turn.response_source.value == "Advocate" else "🔀"
+                    st.markdown(f'<div class="chat-bubble student-bubble"><b>Student:</b> {html.escape(turn.student_response)} <small>[{source_emoji} {turn.response_source.value}]</small></div>', unsafe_allow_html=True)
+
+
+
+                if turn.reconstruction_dimension:
+                    masked_recon = html.escape(manager.teleprompter.DIMENSION_MASK_MAP.get(turn.reconstruction_dimension, turn.reconstruction_dimension.value))
+                    st.markdown(f'<div class="chat-bubble advocate-hint-bubble"><small>→ Pivot to {masked_recon}</small></div>', unsafe_allow_html=True)
+
+            # Active turn Socratic question
+            if active_claim:
+                st.markdown(f'<div class="chat-bubble assessor-bubble"><b>Assessor (Current Probing):</b> {html.escape(st.session_state.next_prompt)}</div>', unsafe_allow_html=True)
+
+            st.markdown("---")
+        
+            # ------------------------------------------
+            # STUDENT INPUT & ADVOCATE CO-CREATION HUB
+            # ------------------------------------------
+            st.subheader("Your Justification Hub")
+
+            # Advocate Helper Section (one-time only per question)
+            if active_claim:
+                adv_col1, adv_col2 = st.columns([2, 1])
+                with adv_col2:
+                    # Disable button if advocate was already generated for this question
+                    advocate_disabled = st.session_state.get("advocate_was_generated", False)
+                    button_label = "✓ Advocate Suggestion Ready" if advocate_disabled else "Generate Brainstorming Suggestions"
+
+                    if st.button(button_label, type="secondary", disabled=advocate_disabled):
+                        with st.spinner("Generating rough brainstorming suggestions..."):
+                            suggestion, pivot_dim = VivaWrapper.get_advocate_defense(
+                                claim=active_claim,
+                                question=st.session_state.next_prompt,
+                                depth=manager.active_depth,
+                                advocate_temp=manager.experiment_profile.advocate_temp if manager.experiment_profile else None
+                            )
+                            st.session_state.advocate_suggestion = suggestion
+                            st.session_state.advocate_pivot = pivot_dim
+                            st.session_state.advocate_was_generated = True  # Flag that advocate was used (disables button)
+                            st.session_state.response_input = suggestion # Pre-populate student answer box
+                            st.session_state.student_resp_key = suggestion # Bind directly to text area key to force refresh
+                            st.rerun()  # Refresh immediately to show disabled button and suggestions
+
+                # The advocate suggestion text is pre-populated in the text area below.
+                # Student response submission form
+                response_input_text = st.text_area(
+                    "Write or co-create your justification (edit the template below):", 
+                    key="student_resp_key",
+                    height=300
                 )
-                st.success("Challenge logged for faculty review.")
-                st.session_state.show_challenge = False
-                st.session_state.challenge_response = ""
-                st.rerun()
+            
+                # Synchronize input to state
+                st.session_state.response_input = response_input_text
+            
+                col_b1, col_b2, col_b3 = st.columns([2, 1, 1])
+                with col_b1:
+                    # Disable button if response already submitted (wait state)
+                    submit_disabled = st.session_state.get("response_submitted_waiting", False)
+
+                    if st.button(
+                        "Submit Rationale to Assessor",
+                        type="primary",
                     
-        # Reference Context Pane (Custom Collapsible) - Only show if there's an active claim
-        if active_claim:
-            st.markdown("---")
-            if "pdf_pane_open" not in st.session_state:
-                st.session_state.pdf_pane_open = True
-
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                if st.button("▼" if st.session_state.pdf_pane_open else "▶", key="pdf_toggle"):
-                    st.session_state.pdf_pane_open = not st.session_state.pdf_pane_open
-                    st.rerun()
-            with col2:
-                st.markdown("**📄 Source Document Reference**")
-
-            if st.session_state.pdf_pane_open:
-                pdf_path = BASE_DIR / manager.epistemic_map.document_name
-                if pdf_path.exists():
-                    try:
-                        # Attempt to extract a cropped image of the specific text
-                        image_bytes = VivaWrapper.extract_claim_image(
-                            pdf_path=str(pdf_path),
-                            page_number=active_claim.page,
-                            search_text=active_claim.text
-                        )
-                        if image_bytes:
-                            with st.container(height=600):
-                                st.image(image_bytes, caption=f"Extracted from {manager.epistemic_map.document_name} (Physical Page {active_claim.page})")
-                            st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel and return to full dialogue view.")
+                        disabled=submit_disabled
+                    ):
+                        if not response_input_text.strip():
+                            st.error("⚠️ Please enter a response before submitting.")
                         else:
-                            st.info("Could not visually locate the text on the page. Displaying extracted text block instead.")
-                            st.markdown(f"> *{active_claim.source_passage}*")
-                            st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel.")
-                    except Exception as e:
-                        st.error("Something went wrong.")
+                            # Mark as submitted to disable button during processing
+                            st.session_state.response_submitted_waiting = True
+
+                            # Show processing status
+                            with st.status("Processing your response...", expanded=True) as status:
+                                status.update(label="📝 Received your response", state="running")
+
+                                # Compute features and scores (this takes a few seconds)
+                                turn, next_prompt = manager.submit_response(
+                                    response=response_input_text
+                                )
+
+                                status.update(label="✅ Response fully evaluated", state="complete")
+
+                            # Provenance is only observable RELATIVE TO THE ADVOCATE. If no
+                            # Advocate draft was generated there is nothing to compare against,
+                            # so the turn stays UNVERIFIED rather than claiming it was student
+                            # written - the system cannot see whether the text came from the
+                            # student, an external model, or anywhere else.
+                            if st.session_state.advocate_was_generated:
+                                similarity = SequenceMatcher(None, response_input_text.lower(), st.session_state.advocate_suggestion.lower()).ratio()
+                                # Record the draft and the divergence, not just the bucket it
+                                # falls into. This is the "intervention log" the design calls
+                                # the richest data source in the session - it was computed and
+                                # then discarded every single turn until now.
+                                turn.advocate_draft = st.session_state.advocate_suggestion
+                                turn.advocate_similarity = round(similarity, 4)
+                                if similarity >= 0.85:
+                                    turn.response_source = ResponseSource.ADVOCATE
+                                elif similarity >= 0.50:
+                                    turn.response_source = ResponseSource.HYBRID
+                                else:
+                                    turn.response_source = ResponseSource.UNVERIFIED
+
+                            st.session_state.last_turn_result = turn
+                            st.session_state.next_prompt = next_prompt
+
+                            # Auto-save checkpoint after each turn
+                            checkpoint_transcript = manager.build_transcript(notes=f"Auto-save checkpoint. Participant ID: {st.session_state.participant_id}")
+                            checkpoint_path = BASE_DIR / "data" / "processed" / f"checkpoint_{manager.session_id}.json"
+                            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                            with open(checkpoint_path, "w", encoding="utf-8") as f:
+                                f.write(checkpoint_transcript.model_dump_json(indent=2))
+
+                            # Reset helper variables for next question
+                            st.session_state.advocate_suggestion = ""
+                            st.session_state.advocate_pivot = None
+                            st.session_state.advocate_was_generated = False
+                            st.session_state.response_input = ""
+                            st.session_state.clear_text_area = True
+                            st.session_state.show_challenge = False
+                            st.session_state.response_submitted_waiting = False  # Re-enable button
+
+                            st.success("✅ Your response has been recorded and evaluated. Loading next question...")
+                            st.rerun()  # Immediately show next question
+
+                with col_b2:
+                    if st.button("Challenge Score Decision", disabled=(not manager.turns)):
+                        st.session_state.show_challenge = True
+                        st.session_state.challenge_response = manager.handle_challenge()
+                        st.rerun()
+
+                with col_b3:
+                    if st.button("❓ Clarify Question", disabled=(not st.session_state.next_prompt)):
+                        st.session_state.show_clarification = True
+                        st.rerun()
+
+            # Clarification request dialog
+            if st.session_state.get("show_clarification", False) and st.session_state.next_prompt:
+                st.info("""
+                **Question Clarification:**
+
+                The question above is asking you to:
+                1. **Explain your reasoning** for the specific design choice
+                2. **Ground your answer** in the original document or design principles
+                3. **Show how** this claim connects to the broader context of your project
+
+                If you're still uncertain, you can:
+                - Re-read the claim and question carefully
+                - Use the "Generate Advocate Defense Helper" to see alternative angles
+                - Take a moment to think, then try rewording your answer
+
+                If you remain unsure, document what you're uncertain about in your response.
+                """)
+                if st.button("Got it, ready to answer"):
+                    st.session_state.show_clarification = False
+                    st.rerun()
+
+            st.markdown("---")
+
+            # ------------------------------------------
+            # METRICS DISPLAY PANEL (Debug Mode Only)
+            # ------------------------------------------
+            if st.session_state.debug_mode:
+                st.subheader("Real-Time Reasoning Signals")
+
+                last_turn = st.session_state.last_turn_result
+                if last_turn:
+                    st.markdown(f"#### Evaluation for Turn {last_turn.turn_index}")
+
+                    m_col1, m_col2 = st.columns(2)
+                    with m_col1:
+                        st.markdown(f"""
+                        <div class="glass-card" style="text-align: center;">
+                            <div class="metric-value">{last_turn.coherence_score:.2f}</div>
+                            <div class="metric-label">Coherence</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    with m_col2:
+                        st.markdown(f"""
+                        <div class="glass-card" style="text-align: center;">
+                            <div class="metric-value">{last_turn.grounding_score:.2f}</div>
+                            <div class="metric-label">Grounding</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+
+                    # Composite Confidence Score gauge
+                    st.markdown(f"""
+                    <div class="glass-card" style="text-align: center; border-color: rgba(139, 92, 246, 0.4);">
+                        <div class="metric-value" style="font-size: 2.5rem; color: #a78bfa;">{last_turn.composite_confidence:.2f}</div>
+                        <div class="metric-label" style="font-weight: 600;">COMPOSITE CONFIDENCE SCORE</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+
                 else:
-                    st.warning(f"Source PDF '{manager.epistemic_map.document_name}' not found in the project root directory. Context pane unavailable.")
+                    st.info("Submit your first response to see the real-time reasoning metrics dashboard.")
+            else:
+                st.info("💡 Enable Debug Mode in Session Controls (sidebar) to see real-time reasoning signals.")
+            
+            # Display the explanation challenge context
+            if st.session_state.show_challenge:
+                st.markdown("---")
+                st.subheader("Challenge This Score")
+                st.write(st.session_state.challenge_response)
+
+                challenge_justification = st.text_input(
+                    "Optional: explain your reasoning for disputing this score (faculty will see this):",
+                    placeholder="My response is grounded because... (leave blank if you'd rather not add anything)"
+                )
+                if st.button("Submit Challenge"):
+                    manager.record_challenge(
+                        justification=challenge_justification,
+                    )
+                    st.success("Challenge logged for faculty review.")
+                    st.session_state.show_challenge = False
+                    st.session_state.challenge_response = ""
+                    st.rerun()
+                    
+            # Reference Context Pane (Custom Collapsible) - Only show if there's an active claim
+            if active_claim:
+                st.markdown("---")
+                if "pdf_pane_open" not in st.session_state:
+                    st.session_state.pdf_pane_open = True
+
+                col1, col2 = st.columns([0.05, 0.95])
+                with col1:
+                    if st.button("▼" if st.session_state.pdf_pane_open else "▶", key="pdf_toggle"):
+                        st.session_state.pdf_pane_open = not st.session_state.pdf_pane_open
+                        st.rerun()
+                with col2:
+                    st.markdown("**📄 Source Document Reference**")
+
+                if st.session_state.pdf_pane_open:
+                    pdf_path = BASE_DIR / manager.epistemic_map.document_name
+                    if pdf_path.exists():
+                        try:
+                            # Attempt to extract a cropped image of the specific text
+                            image_bytes = VivaWrapper.extract_claim_image(
+                                pdf_path=str(pdf_path),
+                                page_number=active_claim.page,
+                                search_text=active_claim.text
+                            )
+                            if image_bytes:
+                                with st.container(height=600):
+                                    st.image(image_bytes, caption=f"Extracted from {manager.epistemic_map.document_name} (Physical Page {active_claim.page})")
+                                st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel and return to full dialogue view.")
+                            else:
+                                st.info("Could not visually locate the text on the page. Displaying extracted text block instead.")
+                                st.markdown(f"> *{active_claim.source_passage}*")
+                                st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel.")
+                        except Exception as e:
+                            st.error("Something went wrong.")
+                    else:
+                        st.warning(f"Source PDF '{manager.epistemic_map.document_name}' not found in the project root directory. Context pane unavailable.")
