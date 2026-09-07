@@ -30,7 +30,7 @@ To launch the Streamlit frontend dashboard, run the following command from the r
 python3 -m streamlit run app_3/app.py
 ```
 This dashboard will allow you to:
-- Select a pre-parsed Epistemic Map
+- Select a pre-parsed Epistemic Map (the ATRM paper is already pre-loaded for you to try immediately!)
 - Engage in a live Socratic dialogue
 - View real-time NLI matrix scores, Epistemic Variance calculations, and composite evaluations.
 
