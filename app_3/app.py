@@ -14,6 +14,8 @@ from app_3.wrapper import VivaWrapper
 from app_3.schemas import EpistemicMap, Claim, PapanekDimension, StudentState, InterventionType, ResponseSource
 from app_3.config import BASE_DIR
 from app_3.theme import inject_theme
+from app_3.simulation import run_autonomous_preflight
+from app_3.review_helpers import collapse_traceback
 from difflib import SequenceMatcher
 
 def _composite_to_letter_grade(composite_score: float) -> str:
@@ -82,6 +84,8 @@ if "show_clarification" not in st.session_state:
     st.session_state.show_clarification = False
 if "fallback_warning" not in st.session_state:
     st.session_state.fallback_warning = None
+if "autonomous_collapsed_claim_id" not in st.session_state:
+    st.session_state.autonomous_collapsed_claim_id = None
 
 # App Title Header
 st.markdown("""
@@ -165,6 +169,11 @@ elif st.session_state.epistemic_map is None:
                                                                               assignment_brief=st.session_state.assignment_brief or None)
                     st.session_state.viva_active = True
                     manager = st.session_state.session_manager
+
+                    with st.spinner("Running autonomous AI pre-flight (Advocate probing itself until it breaks)..."):
+                        preflight = run_autonomous_preflight(manager)
+                    st.session_state.autonomous_collapsed_claim_id = preflight["collapsed_claim_id"]
+
                     active_c = manager.active_claim
                     raw_q = manager.get_current_question()
                     st.session_state.next_prompt = manager.teleprompter.translate_prompt_v2(
@@ -226,6 +235,11 @@ elif st.session_state.epistemic_map is None:
                                                                               assignment_brief=st.session_state.assignment_brief or None)
                     st.session_state.viva_active = True
                     manager = st.session_state.session_manager
+
+                    status.update(label="🤖 Running autonomous AI pre-flight...", state="running")
+                    preflight = run_autonomous_preflight(manager)
+                    st.session_state.autonomous_collapsed_claim_id = preflight["collapsed_claim_id"]
+
                     active_c = manager.active_claim
                     raw_q = manager.get_current_question()
                     st.session_state.next_prompt = manager.teleprompter.translate_prompt_v2(
@@ -316,9 +330,16 @@ else:
             )
             saved_path = VivaWrapper.save_transcript(transcript)
 
-            # Calculate final grade based on average composite confidence
-            if transcript.turns:
-                avg_composite = sum(t.composite_confidence for t in transcript.turns) / len(transcript.turns)
+            # Calculate final grade based on average composite confidence.
+            # Excludes PAUSED stubs and autonomous pre-flight turns (the Advocate's
+            # own, ungraded defense) - same filter build_transcript's review_card
+            # uses, so this on-screen number and the faculty card always agree.
+            graded_turns = [
+                t for t in transcript.turns
+                if t.state != StudentState.PAUSED and not t.autonomous_preflight
+            ]
+            if graded_turns:
+                avg_composite = sum(t.composite_confidence for t in graded_turns) / len(graded_turns)
                 final_grade = _composite_to_letter_grade(avg_composite)
                 grade_color = "#34d399" if final_grade in ["A", "B"] else "#fbbf24" if final_grade == "C" else "#f87171"
             else:
@@ -409,11 +430,38 @@ else:
             st.subheader("Questions")
         
             # Display past turns in chat bubbles
+            has_autonomous_turns = any(getattr(t, "autonomous_preflight", False) for t in manager.turns)
+            if has_autonomous_turns:
+                st.info(
+                    "🤖 **Autonomous AI pre-flight** — before you joined, the on-device "
+                    "Advocate defended these claims on its own, until its own reasoning "
+                    "gave way. Shown for context only; none of it counts toward your grade."
+                )
+            handoff_shown = False
+
             for turn in manager.turns:
+                if has_autonomous_turns and not getattr(turn, "autonomous_preflight", False) and not handoff_shown:
+                    handoff_shown = True
+                    st.markdown("---")
+                    if st.session_state.autonomous_collapsed_claim_id:
+                        trace = collapse_traceback(manager.turns, st.session_state.autonomous_collapsed_claim_id)
+                        if trace:
+                            with st.expander("📋 Assumption traceback — what the AI tried before it broke down", expanded=False):
+                                for row in trace:
+                                    st.markdown(
+                                        f"**Turn {row['turn_index']}** ({row['state'].upper()}, "
+                                        f"support {row['grounding_support']:.2f}) — asked: "
+                                        f"_{html.escape(row['question'])}_"
+                                    )
+                                    st.markdown(f"> {html.escape(row['assumption'])}")
+                                    if row["contradicted_sentence"]:
+                                        st.caption(f"Most-relevant documentation line: \"{row['contradicted_sentence']}\"")
+                    st.success("🧑 **Your turn** — pick up the defense from here. Everything below is yours and counts toward your grade.")
+
                 if turn.intervention_type == InterventionType.PAUSE:
                     st.markdown('<div class="chat-bubble student-bubble" style="background-color: #1c2129; border-color: #454d5a;">[System Action: Session Paused]</div>', unsafe_allow_html=True)
                     continue
-            
+
                 # Find the dimension of the claim at that turn for accurate translation
                 turn_claim = next((c for c in manager.epistemic_map.claims if c.id == turn.claim_id), None)
                 turn_dim = turn_claim.dimension if turn_claim else PapanekDimension.NEED
@@ -550,7 +598,7 @@ else:
                             st.rerun()  # Immediately show next question
 
                 with col_b2:
-                    if st.button("Challenge Score Decision", disabled=(not manager.turns)):
+                    if st.button("⚖️ Challenge Score", disabled=(not manager.turns)):
                         st.session_state.show_challenge = True
                         st.session_state.challenge_response = manager.handle_challenge()
                         st.rerun()
