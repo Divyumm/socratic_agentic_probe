@@ -88,12 +88,40 @@ def rubric_criterion_means(transcript) -> List[Dict[str, Any]]:
     """
     rows: Dict[str, List[float]] = {}
     for t in transcript.turns:
+        if getattr(t, "autonomous_preflight", False):
+            continue  # Advocate's own turns, not the student's - excluded from the grade
         for cid, val in (t.rubric_criterion_scores or {}).items():
             rows.setdefault(cid, []).append(val)
     out = [{"id": cid, "mean": sum(vals) / len(vals), "n": len(vals)}
            for cid, vals in rows.items()]
     out.sort(key=lambda r: r["mean"])
     return out
+
+
+def collapse_traceback(turns: List[Any], claim_id: str) -> List[Dict[str, Any]]:
+    """Ordered record of what the autonomous Advocate asserted on one claim before
+    it collapsed, so the human taking over can see exactly which assumption gave
+    way rather than just being told "the AI failed here".
+
+    Returns one row per autonomous turn on that claim, in the order they were
+    asked: the question, the position the Advocate took, how well the student's
+    own documentation backed it, and the state that position landed in.
+    """
+    rows = []
+    for t in turns:
+        if t.claim_id != claim_id or not getattr(t, "autonomous_preflight", False):
+            continue
+        rows.append({
+            "turn_index": t.turn_index,
+            "question": t.question,
+            "assumption": t.student_response,
+            "grounding_support": t.grounding_nli,
+            "contradicted_sentence": t.contradicted_sentence,
+            "composite": t.composite_confidence,
+            "state": t.state.value if hasattr(t.state, "value") else t.state,
+        })
+    rows.sort(key=lambda r: r["turn_index"])
+    return rows
 
 
 def contradiction_flags(transcript, threshold: float = 0.40) -> List[Any]:

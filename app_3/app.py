@@ -34,7 +34,6 @@ def _composite_to_letter_grade(composite_score: float) -> str:
 # Set page configuration with a modern title and icon
 st.set_page_config(
     page_title="Socratic Assessment",
-    page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -82,6 +81,8 @@ if "challenge_response" not in st.session_state:
     st.session_state.challenge_response = ""
 if "show_clarification" not in st.session_state:
     st.session_state.show_clarification = False
+if "clarification_text" not in st.session_state:
+    st.session_state.clarification_text = ""
 if "fallback_warning" not in st.session_state:
     st.session_state.fallback_warning = None
 if "autonomous_collapsed_claim_id" not in st.session_state:
@@ -123,7 +124,7 @@ elif st.session_state.epistemic_map is None:
         # Optional assignment brief. Fed to the Quality Auditor alongside the rubric
         # so the evidence is judged against what the work was actually asked to do,
         # not the rubric alone. Entirely optional - sessions run unchanged without it.
-        with st.expander("📋 Add assignment brief (optional)", expanded=False):
+        with st.expander("Add assignment brief (optional)", expanded=False):
             st.caption(
                 "The brief the coursework was set against. When provided it is given to "
                 "the Quality Auditor together with the rubric when it scores the "
@@ -221,22 +222,22 @@ elif st.session_state.epistemic_map is None:
         if pdf_to_parse and st.button("Parse Documentation and Extract Map"):
             try:
                 with st.status("Building knowledge map...", expanded=True) as status:
-                    status.update(label="📄 Parsing document...", state="running")
+                    status.update(label="Parsing document...", state="running")
                     parsed_map = VivaWrapper.parse_pdf_to_map(pdf_to_parse)
 
-                    status.update(label="🎯 Extracting key claims...", state="running")
+                    status.update(label="Extracting key claims...", state="running")
                     # (claims already extracted above, just visual update)
 
-                    status.update(label="🔗 Building reasoning map...", state="running")
+                    status.update(label="Building reasoning map...", state="running")
                     st.session_state.epistemic_map = parsed_map
 
-                    status.update(label="⚙️ Initializing session...", state="running")
+                    status.update(label="Initializing session...", state="running")
                     st.session_state.session_manager = VivaWrapper.start_session(parsed_map, st.session_state.participant_id,
                                                                               assignment_brief=st.session_state.assignment_brief or None)
                     st.session_state.viva_active = True
                     manager = st.session_state.session_manager
 
-                    status.update(label="🤖 Running autonomous AI pre-flight...", state="running")
+                    status.update(label="Running autonomous AI pre-flight...", state="running")
                     preflight = run_autonomous_preflight(manager)
                     st.session_state.autonomous_collapsed_claim_id = preflight["collapsed_claim_id"]
 
@@ -254,7 +255,7 @@ elif st.session_state.epistemic_map is None:
                         "actual content. Consider re-parsing the document."
                     ) if n_fallback else None
 
-                    status.update(label="✅ Map ready!", state="complete")
+                    status.update(label="Map ready!", state="complete")
                     st.success("PDF parsed and Epistemic Map successfully created!")
                     st.rerun()
             except Exception as e:
@@ -278,7 +279,7 @@ else:
         # Debug mode toggle
         if "debug_mode" not in st.session_state:
             st.session_state.debug_mode = True  # Enable debug mode by default
-        st.session_state.debug_mode = st.toggle("🐛 Debug Mode (show scores & badges)", value=st.session_state.debug_mode)
+        st.session_state.debug_mode = st.toggle("Debug Mode (show scores & badges)", value=st.session_state.debug_mode)
 
         # Pause
         if st.button("Pause Session"):
@@ -412,8 +413,6 @@ else:
                 <p style="font-size: 1rem; color: #e6e8eb; margin-bottom: 8px;"><b>Extracted Claim:</b> "{clean_text}"</p>
                 <div style="display: flex; gap: 20px; font-size: 0.85rem; color: #9aa3ae;">
                     <span><b>{dim_label}:</b> {dim_val}</span>
-                    <span><b>Probing Depth:</b> {manager.active_depth} / 3</span>
-                    <span><b>Vulnerability Rank:</b> {active_claim.vulnerability_rank}</span>
                     <span><b>Source Page:</b> PDF Page {active_claim.page} (Physical)</span>
                 </div>
             </div>
@@ -433,30 +432,33 @@ else:
             has_autonomous_turns = any(getattr(t, "autonomous_preflight", False) for t in manager.turns)
             if has_autonomous_turns:
                 st.info(
-                    "🤖 **Autonomous AI pre-flight** — before you joined, the on-device "
+                    "**Autonomous AI pre-flight** — before you joined, the on-device "
                     "Advocate defended these claims on its own, until its own reasoning "
                     "gave way. Shown for context only; none of it counts toward your grade."
                 )
             handoff_shown = False
 
+            def _render_handoff_banner():
+                st.markdown("---")
+                if st.session_state.autonomous_collapsed_claim_id:
+                    trace = collapse_traceback(manager.turns, st.session_state.autonomous_collapsed_claim_id)
+                    if trace:
+                        with st.expander("Assumption traceback — what the AI tried before it broke down", expanded=True):
+                            for row in trace:
+                                st.markdown(
+                                    f"**Turn {row['turn_index']}** ({row['state'].upper()}, "
+                                    f"support {row['grounding_support']:.2f}) — asked: "
+                                    f"_{html.escape(row['question'])}_"
+                                )
+                                st.markdown(f"> {html.escape(row['assumption'])}")
+                                if row["contradicted_sentence"]:
+                                    st.caption(f"Most-relevant documentation line: \"{row['contradicted_sentence']}\"")
+                st.success("**Your turn** — pick up the defense from here. Everything below is yours and counts toward your grade.")
+
             for turn in manager.turns:
                 if has_autonomous_turns and not getattr(turn, "autonomous_preflight", False) and not handoff_shown:
                     handoff_shown = True
-                    st.markdown("---")
-                    if st.session_state.autonomous_collapsed_claim_id:
-                        trace = collapse_traceback(manager.turns, st.session_state.autonomous_collapsed_claim_id)
-                        if trace:
-                            with st.expander("📋 Assumption traceback — what the AI tried before it broke down", expanded=False):
-                                for row in trace:
-                                    st.markdown(
-                                        f"**Turn {row['turn_index']}** ({row['state'].upper()}, "
-                                        f"support {row['grounding_support']:.2f}) — asked: "
-                                        f"_{html.escape(row['question'])}_"
-                                    )
-                                    st.markdown(f"> {html.escape(row['assumption'])}")
-                                    if row["contradicted_sentence"]:
-                                        st.caption(f"Most-relevant documentation line: \"{row['contradicted_sentence']}\"")
-                    st.success("🧑 **Your turn** — pick up the defense from here. Everything below is yours and counts toward your grade.")
+                    _render_handoff_banner()
 
                 if turn.intervention_type == InterventionType.PAUSE:
                     st.markdown('<div class="chat-bubble student-bubble" style="background-color: #1c2129; border-color: #454d5a;">[System Action: Session Paused]</div>', unsafe_allow_html=True)
@@ -473,14 +475,21 @@ else:
                 # Response with source label and badges
                 col_resp_label, col_resp_badges = st.columns([3, 1])
                 with col_resp_label:
-                    source_emoji = "🧑" if turn.response_source.value == "Student" else "🤖" if turn.response_source.value == "Advocate" else "🔀"
-                    st.markdown(f'<div class="chat-bubble student-bubble"><b>Student:</b> {html.escape(turn.student_response)} <small>[{source_emoji} {turn.response_source.value}]</small></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="chat-bubble student-bubble"><b>Student:</b> {html.escape(turn.student_response)} <small>[{turn.response_source.value}]</small></div>', unsafe_allow_html=True)
 
 
 
                 if turn.reconstruction_dimension:
                     masked_recon = html.escape(manager.teleprompter.DIMENSION_MASK_MAP.get(turn.reconstruction_dimension, turn.reconstruction_dimension.value))
                     st.markdown(f'<div class="chat-bubble advocate-hint-bubble"><small>→ Pivot to {masked_recon}</small></div>', unsafe_allow_html=True)
+
+            # If every turn so far was autonomous (the human hasn't answered
+            # yet), the loop above never found a human turn to hang the
+            # handoff banner on - show it here, once, right before the human's
+            # first live question.
+            if has_autonomous_turns and not handoff_shown:
+                handoff_shown = True
+                _render_handoff_banner()
 
             # Active turn Socratic question
             if active_claim:
@@ -499,7 +508,7 @@ else:
                 with adv_col2:
                     # Disable button if advocate was already generated for this question
                     advocate_disabled = st.session_state.get("advocate_was_generated", False)
-                    button_label = "✓ Advocate Suggestion Ready" if advocate_disabled else "Generate Brainstorming Suggestions"
+                    button_label = "Advocate Suggestion Ready" if advocate_disabled else "Generate Brainstorming Suggestions"
 
                     if st.button(button_label, type="secondary", disabled=advocate_disabled):
                         with st.spinner("Generating rough brainstorming suggestions..."):
@@ -539,21 +548,21 @@ else:
                         disabled=submit_disabled
                     ):
                         if not response_input_text.strip():
-                            st.error("⚠️ Please enter a response before submitting.")
+                            st.error("Please enter a response before submitting.")
                         else:
                             # Mark as submitted to disable button during processing
                             st.session_state.response_submitted_waiting = True
 
                             # Show processing status
                             with st.status("Processing your response...", expanded=True) as status:
-                                status.update(label="📝 Received your response", state="running")
+                                status.update(label="Received your response", state="running")
 
                                 # Compute features and scores (this takes a few seconds)
                                 turn, next_prompt = manager.submit_response(
                                     response=response_input_text
                                 )
 
-                                status.update(label="✅ Response fully evaluated", state="complete")
+                                status.update(label="Response fully evaluated", state="complete")
 
                             # Provenance is only observable RELATIVE TO THE ADVOCATE. If no
                             # Advocate draft was generated there is nothing to compare against,
@@ -594,37 +603,46 @@ else:
                             st.session_state.show_challenge = False
                             st.session_state.response_submitted_waiting = False  # Re-enable button
 
-                            st.success("✅ Your response has been recorded and evaluated. Loading next question...")
+                            st.success("Your response has been recorded and evaluated. Loading next question...")
                             st.rerun()  # Immediately show next question
 
                 with col_b2:
-                    if st.button("⚖️ Challenge Score", disabled=(not manager.turns)):
+                    if st.button("Challenge Score", disabled=(not manager.turns)):
                         st.session_state.show_challenge = True
                         st.session_state.challenge_response = manager.handle_challenge()
                         st.rerun()
 
                 with col_b3:
-                    if st.button("❓ Clarify Question", disabled=(not st.session_state.next_prompt)):
+                    if st.button("Clarify Question", disabled=(not st.session_state.next_prompt)):
+                        with st.spinner("Rephrasing the question..."):
+                            from app_3.local_llm import LocalGenerator
+                            clarifier = LocalGenerator()
+                            clarify_prompt = (
+                                "Rephrase the following exam question in simpler, plainer "
+                                "language, in one or two short sentences. Do not answer it "
+                                "and do not add any new requirement - only restate what it "
+                                f"is asking for.\n\nQuestion: \"{st.session_state.next_prompt}\""
+                            )
+                            try:
+                                clarification = clarifier.generate(
+                                    prompt=clarify_prompt, temperature=0.2, max_new_tokens=100
+                                )
+                                if "\n" in clarification:
+                                    clarification = clarification.split("\n")[0]
+                                clarification = clarification.strip()
+                            except Exception:
+                                clarification = ""
+                        st.session_state.clarification_text = clarification or (
+                            "Could not generate a clarification right now - try "
+                            "rereading the question above, or rewording your answer."
+                        )
                         st.session_state.show_clarification = True
                         st.rerun()
 
-            # Clarification request dialog
+            # Clarification request dialog - an actual, question-specific rephrasing
+            # generated on demand, not a static generic checklist.
             if st.session_state.get("show_clarification", False) and st.session_state.next_prompt:
-                st.info("""
-                **Question Clarification:**
-
-                The question above is asking you to:
-                1. **Explain your reasoning** for the specific design choice
-                2. **Ground your answer** in the original document or design principles
-                3. **Show how** this claim connects to the broader context of your project
-
-                If you're still uncertain, you can:
-                - Re-read the claim and question carefully
-                - Use the "Generate Advocate Defense Helper" to see alternative angles
-                - Take a moment to think, then try rewording your answer
-
-                If you remain unsure, document what you're uncertain about in your response.
-                """)
+                st.info(f"**In simpler terms:** {st.session_state.get('clarification_text', '')}")
                 if st.button("Got it, ready to answer"):
                     st.session_state.show_clarification = False
                     st.rerun()
@@ -671,7 +689,7 @@ else:
                 else:
                     st.info("Submit your first response to see the real-time reasoning metrics dashboard.")
             else:
-                st.info("💡 Enable Debug Mode in Session Controls (sidebar) to see real-time reasoning signals.")
+                st.info("Enable Debug Mode in Session Controls (sidebar) to see real-time reasoning signals.")
             
             # Display the explanation challenge context
             if st.session_state.show_challenge:
@@ -704,7 +722,7 @@ else:
                         st.session_state.pdf_pane_open = not st.session_state.pdf_pane_open
                         st.rerun()
                 with col2:
-                    st.markdown("**📄 Source Document Reference**")
+                    st.markdown("**Source Document Reference**")
 
                 if st.session_state.pdf_pane_open:
                     pdf_path = BASE_DIR / manager.epistemic_map.document_name
@@ -719,11 +737,11 @@ else:
                             if image_bytes:
                                 with st.container(height=600):
                                     st.image(image_bytes, caption=f"Extracted from {manager.epistemic_map.document_name} (Physical Page {active_claim.page})")
-                                st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel and return to full dialogue view.")
+                                st.caption("Tip: Click the arrow above (▼) to collapse this panel and return to full dialogue view.")
                             else:
                                 st.info("Could not visually locate the text on the page. Displaying extracted text block instead.")
                                 st.markdown(f"> *{active_claim.source_passage}*")
-                                st.caption("💡 Tip: Click the arrow above (▼) to collapse this panel.")
+                                st.caption("Tip: Click the arrow above (▼) to collapse this panel.")
                         except Exception as e:
                             st.error("Something went wrong.")
                     else:

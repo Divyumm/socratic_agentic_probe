@@ -152,9 +152,18 @@ class NLIAuditor:
         """
         try:
             emb = self._encode([text1, text2])
-            cos = float(np.dot(emb[0], emb[1]) / (
-                np.linalg.norm(emb[0]) * np.linalg.norm(emb[1]) + 1e-9
-            ))
+            # errstate suppresses a spurious "divide by zero"/"invalid value"
+            # RuntimeWarning that NumPy's BLAS backend (Apple Accelerate) can
+            # raise on this exact matmul/dot shape on macOS, even when every
+            # input and output is finite and correct - verified empirically
+            # (np.isnan/np.isinf both False on the raw product; scores through
+            # this path have been sane throughout testing). Not masking a real
+            # error: dot/norm here can only be genuinely non-finite if emb
+            # itself is, which _encode never produces.
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                cos = float(np.dot(emb[0], emb[1]) / (
+                    np.linalg.norm(emb[0]) * np.linalg.norm(emb[1]) + 1e-9
+                ))
             return round((cos + 1.0) / 2.0, 4)
         except Exception as e:
             print(f"[NLIAuditor] Error computing similarity: {e}")
@@ -201,6 +210,29 @@ class NLIAuditor:
                 out.extend(e + 0.5 * n)
         return np.asarray(out, dtype=float)
 
+    def _contradiction_probs_cross_encoder(self, premises: List[str], hypotheses: List[str]) -> np.ndarray:
+        """Raw P(contradiction) for text pairs - the cross-encoder backend only.
+
+        The ordinal support scale (P(entail) + 0.5*P(neutral)) collapses the
+        3-way distribution into one number, so a strong contradiction and a
+        weak-but-genuine neutral can land at similar support values. This is
+        the discrete signal the ordinal scale discards: used only for a hard
+        contradiction flag (see config.CONTRADICTION_FLAG_THRESHOLD), never
+        blended into the continuous composite terms.
+        """
+        import torch
+        out = []
+        BATCH = 16
+        with torch.no_grad():
+            for i in range(0, len(premises), BATCH):
+                enc = self._ce_tok(
+                    premises[i:i + BATCH], hypotheses[i:i + BATCH],
+                    return_tensors="pt", truncation=True, max_length=512, padding=True,
+                )
+                probs = torch.softmax(self._ce_model(**enc).logits, dim=-1).numpy()
+                out.extend(probs[:, self._ce_label_idx["contradiction"]])
+        return np.asarray(out, dtype=float)
+
     def _support_pairs(self, premises: List[str], hypotheses: List[str]) -> np.ndarray:
         """Support for aligned text pairs, via whichever backend is configured."""
         from app_3.config import NLI_BACKEND
@@ -226,7 +258,10 @@ class NLIAuditor:
             emb_h = np.atleast_2d(emb_h)
             num = np.sum(emb_p * emb_h, axis=1)
             den = np.linalg.norm(emb_p, axis=1) * np.linalg.norm(emb_h, axis=1) + 1e-9
-            cos = num / den
+            # See compute_sts_similarity's comment: suppresses a spurious BLAS
+            # (Apple Accelerate) warning on this matmul shape, not a real error.
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                cos = num / den
             return 0.5 + 0.5 * np.clip(cos, 0.0, 1.0)
 
         X = self._pair_features(emb_p, emb_h)
@@ -264,34 +299,55 @@ class NLIAuditor:
         toward neutral.
 
         Returns:
-            support        -- relevance-weighted mean support in [0, 1]
-            min_support    -- most-contradicted sentence, the contradiction signal
-            top_sentence   -- the sentence carrying the most weight, for display
-            n_sentences    -- how many sentences were scored
+            support               -- relevance-weighted mean support in [0, 1]
+            min_support           -- most-contradicted sentence, the contradiction signal
+            top_sentence          -- the sentence carrying the most weight, for display
+            n_sentences           -- how many sentences were scored
+            max_contradiction_prob -- highest raw P(contradiction) among the
+                                       relevant sentences (cross-encoder backend
+                                       only; 0.0 otherwise - see the contradiction
+                                       flag in probe_engine.py)
         """
         sentences = self.split_sentences(document)
         if not sentences:
+            single_support = self.compute_support(document, hypothesis)
             return {
-                "support": self.compute_support(document, hypothesis),
-                "min_support": self.compute_support(document, hypothesis),
+                "support": single_support,
+                "min_support": single_support,
                 "top_sentence": document[:200],
                 "n_sentences": 0,
+                "max_contradiction_prob": 0.0,
             }
 
         try:
             emb_sent = self._encode(sentences)
             emb_hyp = self._encode([hypothesis])[0]
-            
+
             query_str = weighting_query if weighting_query else hypothesis
             emb_query = self._encode([query_str])[0] if weighting_query else emb_hyp
 
             emb_hyp_tiled = np.tile(emb_hyp, (len(sentences), 1))
             supports = self._support_pairs(sentences, [hypothesis] * len(sentences))
 
+            # Raw contradiction probability, kept separate from the ordinal
+            # support scale above - only available with the cross-encoder
+            # backend, since the linear-head/cosine path has no 3-way
+            # distribution to draw it from.
+            from app_3.config import NLI_BACKEND
+            if NLI_BACKEND == "cross-encoder" and self._ensure_cross_encoder():
+                contradiction_probs = self._contradiction_probs_cross_encoder(
+                    sentences, [hypothesis] * len(sentences)
+                )
+            else:
+                contradiction_probs = np.zeros(len(sentences), dtype=float)
+
             # Relevance weights: softmax over cosine similarity to the query.
             num = emb_sent @ emb_query
             den = np.linalg.norm(emb_sent, axis=1) * np.linalg.norm(emb_query) + 1e-9
-            cos = num / den
+            # See compute_sts_similarity's comment: suppresses a spurious BLAS
+            # (Apple Accelerate) warning on this matmul shape, not a real error.
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                cos = num / den
             # Restrict to the most relevant sentences before weighting. A long,
             # messy PDF passage (tables, headers, fragments) otherwise dilutes a
             # decisive entailment against dozens of irrelevant sentences, pulling
@@ -303,6 +359,7 @@ class NLIAuditor:
                 keep = np.argsort(cos)[-k:]
                 cos = cos[keep]
                 supports = supports[keep]
+                contradiction_probs = contradiction_probs[keep]
 
             logits = cos / 0.1  # temperature: sharp enough to ignore noise
             weights = np.exp(logits - logits.max())
@@ -314,6 +371,7 @@ class NLIAuditor:
                 "min_support": round(float(supports.min()), 4),
                 "top_sentence": sentences[int(weights.argmax())],
                 "n_sentences": len(sentences),
+                "max_contradiction_prob": round(float(contradiction_probs.max()), 4),
             }
         except Exception as e:
             print(f"[NLIAuditor] Error scoring against document: {e}")
@@ -322,6 +380,7 @@ class NLIAuditor:
                 "min_support": 0.5,
                 "top_sentence": "",
                 "n_sentences": len(sentences),
+                "max_contradiction_prob": 0.0,
             }
 
     def score_document_against_many(
@@ -349,9 +408,13 @@ class NLIAuditor:
             for hyp, emb_hyp in zip(hypotheses, emb_hyps):
                 supports = self._support_pairs(sentences, [hyp] * len(sentences))
 
-                cos = (emb_sent @ emb_hyp) / (
-                    sent_norms * np.linalg.norm(emb_hyp) + 1e-9
-                )
+                # See compute_sts_similarity's comment: suppresses a spurious
+                # BLAS (Apple Accelerate) warning on this matmul shape, not a
+                # real error - confirmed empirically (raw product has no NaN/Inf).
+                with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                    cos = (emb_sent @ emb_hyp) / (
+                        sent_norms * np.linalg.norm(emb_hyp) + 1e-9
+                    )
                 logits = cos / 0.1
                 weights = np.exp(logits - logits.max())
                 weights = weights / weights.sum()

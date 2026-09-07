@@ -45,6 +45,16 @@ class ProbingSessionManager:
         # answer, a threshold collapse, a pivot, or a student redirect.
         self.consecutive_unstable_turns = 0
         self.session_state = StudentState.GROUNDED
+
+        # Claim ids that have already survived a specificity challenge (see the
+        # GROUNDED branch below) - tracked so a claim need only prove itself
+        # once even if revisited later.
+        self.specificity_challenged: set = set()
+        # A one-off, dynamically generated question overriding the static
+        # per-claim question bank for exactly the next turn. Set by the
+        # specificity-challenge step; get_current_question() returns it when
+        # present, and it is cleared whenever the active claim changes.
+        self.pending_dynamic_question: Optional[str] = None
         
         # Layer 2 Rubric Store
         self.challenges: List[ChallengeRecord] = []
@@ -65,9 +75,45 @@ class ProbingSessionManager:
         """Generates the probing question for the active claim and depth."""
         if not self.active_claim:
             return "No more claims to probe. The session is complete!"
-            
+
+        if self.pending_dynamic_question:
+            return self.pending_dynamic_question
+
         # Get question from client
         return self.llm_client.generate_question(self.active_claim.model_dump(), self.active_depth)
+
+    def _generate_specificity_challenge(self, claim_text: str, previous_response: str) -> str:
+        """One dynamically generated follow-up demanding a concrete, checkable
+        specific - not another open-ended question, which can itself be dodged
+        with more fluent generality.
+
+        Validated empirically: a topically-fluent but substance-free answer
+        cleared the Grounded bar on its first turn (coherence/grounding scored
+        it against the CLAIM's general vocabulary, not against whether it
+        engaged with the actual question). Once forced to repeatedly produce a
+        named example, a number, or a first-hand observation instead of another
+        general statement, the same register of answer degraded and collapsed
+        within a few rounds. This is the mechanism that makes that pressure
+        happen on every claim, not just ones that happen to fail immediately.
+        """
+        from app_3.simulation import AssessorAgent
+        assessor = AssessorAgent()
+        prompt = (
+            f"You are a strict examiner. The claim under discussion is: \"{claim_text}\"\n\n"
+            f"The student just said: \"{previous_response}\"\n\n"
+            f"Ask ONE short, sharp follow-up question that demands a concrete, "
+            f"checkable specific - a named example, a number, or a particular "
+            f"first-hand observation from their own work - and cannot be "
+            f"answered with another general statement."
+        )
+        try:
+            q = assessor.client.generate(prompt=prompt, temperature=0.2, max_new_tokens=60)
+            if "\n" in q:
+                q = q.split("\n")[0]
+            q = q.strip()
+            return q or "Give one specific, concrete example that supports this claim."
+        except Exception:
+            return "Give one specific, concrete example that supports this claim."
 
     def submit_response(self, response: str, intervention: Optional[InterventionType] = None,
                         w_bias: Optional[float] = None,
@@ -141,6 +187,14 @@ class ProbingSessionManager:
         # view: it names which line the answer diverged from, not just that it did.
         contradiction_signal = doc_result["min_support"]
         contradicted_sentence = doc_result["top_sentence"]
+
+        # Discrete contradiction flag - see config.CONTRADICTION_FLAG_THRESHOLD.
+        # Independent of contradiction_signal above: that is the ordinal support
+        # scale's minimum (P(entail) + 0.5*P(neutral), collapsed), which can sit
+        # in the middle of its range for a confident contradiction. This reads
+        # the raw P(contradiction) the ordinal scale discards.
+        from app_3.config import CONTRADICTION_FLAG_THRESHOLD, CONTRADICTION_FLAG_PENALTY
+        contradiction_flag = doc_result.get("max_contradiction_prob", 0.0) >= CONTRADICTION_FLAG_THRESHOLD
 
         # 3. Build combined evidence: documentation + epistemic map + accumulated responses/dialogue
         if response and response.strip():
@@ -248,6 +302,8 @@ class ProbingSessionManager:
              W_GROUNDING_NLI * (final_grounding_nli - NEUTRAL) +
              W_GROUNDING_STS * (final_grounding_sts - NEUTRAL) +
              W_VARIANCE_NLI * variance_nli + W_VARIANCE_STS * variance_sts)
+        if contradiction_flag:
+            z -= CONTRADICTION_FLAG_PENALTY
         composite_confidence = float(1.0 / (1.0 + np.exp(-z)))
 
         features = {
@@ -359,12 +415,29 @@ class ProbingSessionManager:
             )
             # Reset active claim depth and pivot to new dimension
             self.active_depth = 0
+            self.pending_dynamic_question = None
             self._select_next_vulnerable_claim(exclude_dimensions=[self.active_claim.dimension])
         elif state == StudentState.UNSTABLE:
             self.active_depth += 1
             next_prompt = f"\n[PLATEAU EROSION DETECTED - PROBING DEEPER]\n{self.get_current_question()}"
+        elif self.active_claim.id not in self.specificity_challenged:
+            # Grounded - but a single Grounded turn is not proof of understanding.
+            # Testing found a fluent, topically-adjacent-but-generic answer can
+            # clear this bar without engaging with what was actually asked, since
+            # coherence/grounding measure similarity to the CLAIM's vocabulary,
+            # not whether the specific question was addressed. Every claim must
+            # survive one explicit, SLM-generated demand for a concrete, checkable
+            # specific before it is resolved - this is what let the same kind of
+            # generic answer collapse within a few rounds once actually pressed.
+            self.specificity_challenged.add(self.active_claim.id)
+            self.active_depth += 1
+            challenge_question = self._generate_specificity_challenge(current_claim_text, response)
+            self.pending_dynamic_question = challenge_question
+            next_prompt = f"\n[GROUNDED - BUT PROVE IT]\n{challenge_question}"
         else:
-            # Grounded! Resolve this claim and move to the next vulnerable one
+            # Grounded, and already survived its specificity challenge - resolve
+            # this claim for real and move to the next vulnerable one.
+            self.pending_dynamic_question = None
             self.probed_claim_history.append(self.active_claim.id)
             old_claim_text = self.active_claim.text
             self._select_next_vulnerable_claim()
@@ -394,6 +467,7 @@ class ProbingSessionManager:
             rubric_criterion_scores=rubric_criterion_scores,
             contradiction_signal=contradiction_signal,
             contradicted_sentence=contradicted_sentence,
+            contradiction_flag=contradiction_flag,
             state=state,
             consecutive_unstable_turns=consecutive_unstable_at_turn,
             escalated_from_unstable=escalated_from_unstable,
@@ -476,6 +550,10 @@ class ProbingSessionManager:
         self.active_depth = 0
         # The streak is per-claim, so a student-initiated redirect clears it.
         self.consecutive_unstable_turns = 0
+        # A pending specificity-challenge question belongs to whatever claim was
+        # active before the redirect - clear it so the new claim gets its own
+        # normal question rather than an unrelated leftover one.
+        self.pending_dynamic_question = None
         return f"Probing redirected to claim '{self.active_claim.text}'.\nQuestion: {self.get_current_question()}"
 
     def build_evidence_portfolio(self) -> str:
@@ -598,7 +676,13 @@ class ProbingSessionManager:
         # offline or quota-limited session produced no card at all.
         if completed and self.turns:
             from app_3.schemas import ReviewCard
-            confidences = [t.composite_confidence for t in self.turns if t.state != StudentState.PAUSED]
+            # Autonomous pre-flight turns were answered by the Advocate, not the
+            # student - they locate where the student needed to take over, and are
+            # never part of what the student is graded on.
+            confidences = [
+                t.composite_confidence for t in self.turns
+                if t.state != StudentState.PAUSED and not t.autonomous_preflight
+            ]
             avg_confidence = sum(confidences) / len(confidences) if confidences else 1.0
             
             v_a_composite = None

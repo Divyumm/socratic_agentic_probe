@@ -12,15 +12,19 @@ from app_3.config import MOCK_MODE, ANTHROPIC_API_KEY, ADVOCATE_MODEL, ADVOCATE_
 from app_3.llm_client import _clamp_temp
 
 
-def _cap_advocate_length(text: str, max_chars: int) -> str:
+def _cap_advocate_length(text: str, max_chars: Optional[int]) -> str:
     """Hard, word-boundary-safe cap on the Advocate's output.
 
     The prompt asks for brevity, but a 0.5B model does not reliably count
     characters from an instruction - this is the deterministic backstop that
     actually enforces the limit regardless of what the model produces.
+
+    max_chars=None (config.ADVOCATE_MAX_CHARS's default) disables truncation
+    entirely - length is no longer the defense against Advocate text scoring
+    too high; see config.py's comment on ADVOCATE_MAX_CHARS.
     """
     text = (text or "").strip()
-    if len(text) <= max_chars:
+    if max_chars is None or len(text) <= max_chars:
         return text
     cut = text[:max_chars].rsplit(" ", 1)[0].rstrip(",.;:- ")
     return (cut + "…") if cut else text[:max_chars].rstrip()
@@ -108,25 +112,28 @@ class AdvocateAgent:
         # Use Claude at VERY high temperature if client is active
         # High temperature encourages rough, varied brainstorming (not polished answers)
         if self.client is not None:
+            # Written as a single flowing instruction rather than a numbered/
+            # labelled checklist on purpose: a numbered list with colon-led
+            # labels ("Show uncertainty: ...") was echoed back near-verbatim as
+            # if it were the nudge itself, rather than followed - a 0.5B model
+            # pattern-matches a fill-in-the-blank template far more readily
+            # than it follows one. Plain prose guidance doesn't give it a
+            # template shape to copy.
             prompt = f"""
-You are an external voice giving a student ONE brief nudge to react to - not an
-answer, not an argument for them, just a short prompt to think from.
+You are an external voice giving a student one nudge to react to, not an
+answer and not an argument for them - just something to think from.
 
-Context:
-- Claim to explore: "{claim_text}"
-- Original work: "{source_passage}"
-- Question being probed: "{question}"
-- Angle to explore: {current_dim_label}
-- Depth: {depth}
+Context: the claim under discussion is "{claim_text}", drawn from this
+original work: "{source_passage}". The question being probed is
+"{question}", from the angle of {current_dim_label}.
 
-Write ONE short, uncertain nudge (not a finished thought):
-1. Under 40 words. One or two short sentences at most.
-2. Show uncertainty - "maybe", "could be", "what if" - never a settled position.
-3. Raise a single consideration or question; do NOT argue a case for the student.
-4. No markdown, asterisks, or stage directions - just plain text.
-5. Do not number or list multiple points - one consideration only.
-
-Remember: you are prompting the student to think, not writing their answer.
+In your own words, write a single genuinely uncertain thought about this -
+something a thoughtful outsider might mutter half to themselves, using words
+like "maybe" or "what if" rather than landing on a settled position. Make it
+one reflective observation, not a question aimed back at the student, and
+don't build a case for them - you are prompting them to think, not answering
+for them and not interrogating them in return. Write it as plain prose, with
+no markdown, asterisks, stage directions, or numbered points.
 """
             try:
                 # Use VERY high temperature for diverse, varied outputs
@@ -135,16 +142,17 @@ Remember: you are prompting the student to think, not writing their answer.
                 defense_text = self.client.generate(
                     prompt=prompt,
                     temperature=_clamp_temp(high_temp),
-                    # Generation budget left generous (not tied to the 128-char
-                    # target) on purpose: a 0.5B model given a tiny token budget
-                    # alongside a "be extremely brief" instruction tends to open
-                    # by echoing the constraint itself ("Under 20 words: ...")
-                    # rather than moving past it into real content, because there
-                    # is little room left to do anything else. A larger budget
-                    # gives it room to get past that opener; the deterministic
-                    # 128-char cap below is what actually enforces the length,
-                    # regardless of how much was generated.
-                    max_new_tokens=200
+                    # Generation budget kept generous rather than tight: a tiny
+                    # token budget alongside a brevity instruction previously
+                    # made the model spend its whole budget echoing the
+                    # constraint itself ("Under 20 words: ...") instead of
+                    # producing real content. Neither the prompt nor a post-hoc
+                    # cap now limits length (see AdvocateAgent's docstring and
+                    # config.ADVOCATE_MAX_CHARS), and without the old word-count
+                    # instruction the model runs noticeably longer - raised from
+                    # 200 to 350 so a genuinely organic-length nudge doesn't get
+                    # cut off mid-sentence.
+                    max_new_tokens=350
                 )
                 defense_text = _strip_stage_directions(defense_text)
                 if defense_text:
@@ -169,6 +177,128 @@ Remember: you are prompting the student to think, not writing their answer.
             )
             
         return _cap_advocate_length(defense_text, ADVOCATE_MAX_CHARS), pivot_dimension
+
+def run_autonomous_preflight(manager: ProbingSessionManager, max_claims: Optional[int] = None) -> Dict[str, Any]:
+    """Runs the on-device Advocate against the Assessor's own questions, claim by
+    claim, with no human involved, until the FIRST genuine reasoning collapse -
+    the same StudentState.COLLAPSED (threshold or sustained-instability) the live
+    viva already computes - or until max_claims distinct claims have been
+    explored, whichever comes first. The human then takes over from there.
+
+    A Grounded (or not-yet-escalated Unstable) verdict on the Advocate's own
+    answer does NOT end probing of that claim here. The Advocate is instructed
+    to answer with deliberately hedged, uncertain language (see
+    AdvocateAgent.generate_response) - testing showed those non-committal
+    answers, and even the Advocate simply reflecting the question back rather
+    than answering it, can still score as entailed against strong
+    documentation. A single Grounded reading is therefore not trustworthy
+    evidence the claim actually held up; this loop keeps pressing the SAME
+    claim at increasing depth until it genuinely collapses, or the pre-written
+    question bank for that claim runs out (MAX_DEPTH), at which point it is
+    conceded - NOT marked resolved - and probing moves to the next candidate.
+
+    Because of that, probed_claim_history is never touched here: the whole
+    session's MAX_CLAIMS_TO_PROBE budget is left untouched by the pre-flight
+    (submit_response's own bookkeeping for a Grounded verdict is undone below),
+    so the human always gets a full, independent allotment of claims regardless
+    of what the Advocate did before they joined - testing an earlier version of
+    this function found the opposite: a run where every claim came back
+    Grounded silently exhausted the shared claim budget and left no active
+    claim for the human at all.
+
+    Every turn still goes through the real, current submit_response() pipeline
+    (cross-encoder NLI, escalation, everything this session's fixes cover), so
+    nothing about the scoring logic is duplicated or re-approximated here. Each
+    turn is tagged response_source=ADVOCATE and autonomous_preflight=True: the
+    second flag is what excludes it from the graded composite/rubric (see
+    build_transcript and rubric_criterion_means) - the Advocate's performance
+    only decides where the human needs to step in, never the student's score.
+
+    Scored against the tighter PREFLIGHT_* thresholds (config.py), not the
+    human-facing GROUNDED_THRESHOLD/COLLAPSE_THRESHOLD/MAX_CONSECUTIVE_UNSTABLE
+    - a borderline reading of the Advocate's deliberately hedged answer should
+    count against it, so a genuine breakdown surfaces sooner than MAX_DEPTH.
+    """
+    from app_3.schemas import ResponseSource, StudentState
+    from app_3.config import (
+        MAX_CLAIMS_TO_PROBE, MAX_DEPTH,
+        PREFLIGHT_GROUNDED_THRESHOLD, PREFLIGHT_COLLAPSE_THRESHOLD,
+        PREFLIGHT_MAX_CONSECUTIVE_UNSTABLE,
+    )
+
+    claim_limit = max_claims if max_claims is not None else MAX_CLAIMS_TO_PROBE
+
+    advocate = AdvocateAgent()
+    collapsed_claim_id: Optional[str] = None
+    turns_run = 0
+    claims_seen: List[str] = []
+    depth_on_claim = 0
+    MAX_TURNS = 200  # defensive backstop only; real termination is state/claim-count driven
+
+    while manager.active_claim is not None and turns_run < MAX_TURNS:
+        claim = manager.active_claim
+        if claim.id not in claims_seen:
+            if len(claims_seen) >= claim_limit:
+                break
+            claims_seen.append(claim.id)
+            depth_on_claim = 0
+            manager.active_depth = 0
+
+        question = manager.get_current_question()
+
+        defense_text, _pivot_dimension = advocate.generate_response(
+            claim_id=claim.id,
+            claim_text=claim.text,
+            source_passage=claim.source_passage or claim.text,
+            current_dimension=claim.dimension,
+            question=question,
+            depth=manager.active_depth,
+        )
+
+        turn, _next_prompt = manager.submit_response(
+            response=defense_text,
+            collapse_limit=PREFLIGHT_COLLAPSE_THRESHOLD,
+            unstable_limit=PREFLIGHT_GROUNDED_THRESHOLD,
+            max_consecutive_unstable=PREFLIGHT_MAX_CONSECUTIVE_UNSTABLE,
+        )
+        turn.response_source = ResponseSource.ADVOCATE
+        turn.autonomous_preflight = True
+        turns_run += 1
+
+        if turn.state == StudentState.COLLAPSED:
+            collapsed_claim_id = turn.claim_id
+            break
+
+        # Override whatever submit_response just did for a non-collapse verdict
+        # (advance to a new claim on Grounded, or bump depth on Unstable): undo
+        # any resolution bookkeeping and keep pressing this exact claim, at a
+        # depth we track ourselves rather than trusting the branch taken above.
+        if claim.id in manager.probed_claim_history:
+            manager.probed_claim_history.remove(claim.id)
+        depth_on_claim += 1
+        manager.active_claim = claim
+        manager.active_depth = depth_on_claim
+
+        if depth_on_claim > MAX_DEPTH:
+            # Question bank for this claim is exhausted without a collapse -
+            # concede it (still not marked probed/resolved) and move to the
+            # next most-vulnerable claim not yet explored this pre-flight.
+            # consecutive_unstable_turns is reset too: it is meant to track a
+            # streak on ONE claim, and left alone would otherwise carry over
+            # into the next claim - or into the human's own first turn, under
+            # the very different default (non-PREFLIGHT) thresholds.
+            remaining = [c for c in manager.epistemic_map.claims if c.id not in claims_seen]
+            manager.active_claim = remaining[0] if remaining else None
+            manager.active_depth = 0
+            manager.consecutive_unstable_turns = 0
+            depth_on_claim = 0
+
+    return {
+        "collapsed_claim_id": collapsed_claim_id,
+        "turns_run": turns_run,
+        "claims_explored": len(claims_seen),
+    }
+
 
 class EvaluatorAgent:
     """Simulates the Evaluator Agent that judges substantive coherence."""

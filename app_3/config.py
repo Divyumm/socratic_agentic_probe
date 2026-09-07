@@ -68,30 +68,20 @@ MAX_CONSECUTIVE_UNSTABLE = int(os.getenv("VIVA_MAX_CONSECUTIVE_UNSTABLE", "3"))
 
 # Advocate response length cap.
 #
-# The Advocate was originally prompted for "2-3 rough talking points" at very
-# high temperature (1.8) and up to 200 generated tokens - producing text long
-# and coherent enough that a student could plausibly submit it near-verbatim.
-# Measured this session: Advocate-sourced turns averaged 112 words vs 71 for
-# genuine student turns, and scored higher on average (0.777 vs 0.702) purely
-# because longer, more claim-similar text is what the grounding signals reward.
-#
-# The project's original intent was narrower than that: an external voice the
-# student can react to, without it advocating a fully-formed position for them
-# - "see external agency discuss their work without [it] advocating their
-# point of view strongly". A hard character cap enforces that structurally:
-# 256 characters is roughly one or two short sentences - room for one genuine
-# consideration, still short of a submittable answer, so elaboration still has
-# to come from the student. (Started at 128; widened after the model, given
-# only a 48-token generation budget to roughly match it, tended to spend that
-# budget echoing the prompt's own brevity instruction instead of answering -
-# see simulation.py's AdvocateAgent for the fuller note. The generation budget
-# was restored to 200 tokens for the same reason; this cap, not the token
-# budget, is what actually enforces the length.)
-#
-# Applied as a deterministic post-generation truncation (word-boundary safe),
-# not just a prompt instruction - a 0.5B model does not reliably count
-# characters from a text instruction alone.
-ADVOCATE_MAX_CHARS = int(os.getenv("VIVA_ADVOCATE_MAX_CHARS", "256"))
+# Was a hard character truncation (started 128, widened to 256) defending
+# against Advocate-sourced turns scoring higher than genuine student turns
+# purely from length/claim-similarity (measured: 112 words avg vs 71, 0.777
+# vs 0.702 composite). That vulnerability is now handled at the scoring/
+# interrogation layer instead: no claim resolves on a single Grounded turn
+# (see the specificity-challenge step in probe_engine.py's submit_response),
+# COLLAPSE_THRESHOLD was raised, and the contradiction flag above catches a
+# confidently-wrong answer regardless of length. With those in place, capping
+# the Advocate's own text is no longer needed to keep the score honest, and
+# was costing the project's actual intent - a genuinely useful "external voice
+# to react to" - so the cap is lifted. None (the default) disables truncation;
+# set VIVA_ADVOCATE_MAX_CHARS to an int to reinstate one.
+_advocate_max_chars_env = os.getenv("VIVA_ADVOCATE_MAX_CHARS")
+ADVOCATE_MAX_CHARS = int(_advocate_max_chars_env) if _advocate_max_chars_env else None
 
 # Entailment backend.
 #
@@ -168,6 +158,28 @@ W_GROUNDING_STS = float(os.getenv("VIVA_W_GROUNDING_STS", "2.0"))
 W_VARIANCE_NLI = float(os.getenv("VIVA_W_VARIANCE_NLI", "-1.8"))
 W_VARIANCE_STS = float(os.getenv("VIVA_W_VARIANCE_STS", "-1.5"))
 
+# Contradiction flag: a discrete override, not another continuous weighted term.
+#
+# grounding_nli/grounding_sts are continuous, and testing found the underlying
+# cross-encoder's raw probabilities can be noisy on genuinely degenerate text
+# (a word-salad sample scored P(entail)=0.81 in one run, 0.09 in another, for
+# equally meaningless input). Rather than trust that continuous magnitude
+# further, this reads the cross-encoder's raw P(contradiction) directly - not
+# the ordinal support scale, which already blends it away - and applies a
+# fixed penalty ONLY when the model is confidently (>50%) calling the answer a
+# contradiction of the student's own documentation. This rides alongside the
+# existing grounding terms rather than replacing them: removing NLI's
+# continuous contribution entirely would leave grounding as pure cosine
+# similarity, which cannot detect contradiction at all (see nli_auditor.py's
+# degraded-path comment).
+#
+# Applied in logit space before the sigmoid, the same way variance is, so it
+# composes with the rest of z rather than clamping composite_confidence
+# directly. Hand-set, not fitted - no independent labels exist yet to
+# calibrate against (see the threshold caveat above).
+CONTRADICTION_FLAG_THRESHOLD = float(os.getenv("VIVA_CONTRADICTION_FLAG_THRESHOLD", "0.5"))
+CONTRADICTION_FLAG_PENALTY = float(os.getenv("VIVA_CONTRADICTION_FLAG_PENALTY", "2.0"))
+
 # Reasoning-state decision thresholds on the composite.
 #
 # These were hardcoded in probe_engine (0.40 / 0.65) and had never been fitted to
@@ -187,7 +199,38 @@ W_VARIANCE_STS = float(os.getenv("VIVA_W_VARIANCE_STS", "-1.5"))
 # (blind to its classification, from a rater who is not the system's author), then
 # fit thresholds first and weights second.
 GROUNDED_THRESHOLD = float(os.getenv("VIVA_GROUNDED_THRESHOLD", "0.65"))
-COLLAPSE_THRESHOLD = float(os.getenv("VIVA_COLLAPSE_THRESHOLD", "0.40"))
+# Raised from 0.40 after testing showed 0.40 was too low to ever fire on a
+# single turn: even a genuinely incoherent, word-salad Advocate answer (grounding_nli
+# crashed to 0.091) only pulled the composite down to 0.455, because grounding_sts/
+# coherence_sts (cosine terms, weighted 3.5 combined vs grounding_nli's 2.2) stay
+# moderate as long as SOME topical vocabulary survives, even in nonsense text. 0.40
+# meant single-turn collapse was effectively unreachable regardless of how bad the
+# answer was - only the multi-turn escalation streak could ever fire.
+#
+# 0.50 was chosen, not the 0.455 breakeven point exactly, to keep Unstable a real,
+# distinct band rather than a sliver: measured scores for vague/evasive (0.57),
+# contradictory (0.55), off-topic (0.55), and fluent-but-shallow (0.59-0.68) answers
+# all sit ABOVE 0.50, so they still land Unstable - genuinely different, milder
+# failure modes than outright incoherence, not immediately Collapsed. Only the
+# gibberish case (0.455) crosses below it. Still hand-set, not calibrated against
+# independent labels - same caveat as above.
+COLLAPSE_THRESHOLD = float(os.getenv("VIVA_COLLAPSE_THRESHOLD", "0.50"))
+
+# Tighter thresholds used ONLY by the autonomous pre-flight (run_autonomous_
+# preflight in simulation.py), never by a human-answered turn. The Advocate is
+# deliberately instructed to answer with hedged, uncertain language and no
+# committed position - testing found the entailment scorer still reads that
+# kind of answer, and even a reflected question with no assertion in it at
+# all, as comfortably Grounded against strong documentation. Giving the
+# Advocate the same benefit of the doubt as a human means the pre-flight
+# rarely finds a genuine breakdown before exhausting MAX_DEPTH on a claim.
+# These narrow the Unstable band and shorten the escalation streak so a
+# borderline reading counts against the Advocate rather than for it, and a
+# claim fails sooner without the verdict becoming arbitrary. Hand-set, not
+# calibrated - same caveat as the thresholds above.
+PREFLIGHT_GROUNDED_THRESHOLD = float(os.getenv("VIVA_PREFLIGHT_GROUNDED_THRESHOLD", "0.75"))
+PREFLIGHT_COLLAPSE_THRESHOLD = float(os.getenv("VIVA_PREFLIGHT_COLLAPSE_THRESHOLD", "0.55"))
+PREFLIGHT_MAX_CONSECUTIVE_UNSTABLE = int(os.getenv("VIVA_PREFLIGHT_MAX_CONSECUTIVE_UNSTABLE", "2"))
 
 # Stamped onto every turn so analysis can separate transcripts scored under
 # different weight sets. Bump this whenever the weights above change.

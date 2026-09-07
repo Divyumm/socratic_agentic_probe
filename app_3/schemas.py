@@ -82,6 +82,12 @@ class ProbeTurn(BaseModel):
     rubric_criterion_scores: Dict[str, float] = Field(default_factory=dict, description="Support score per rubric criterion id")
     contradiction_signal: float = Field(default=0.5, ge=0.0, le=1.0, description="Lowest per-sentence support against the documentation; low values indicate contradiction")
     contradicted_sentence: Optional[str] = Field(None, description="Documentation sentence most relevant to the response, for faculty review")
+    # Discrete signal, distinct from contradiction_signal above: True only when
+    # the cross-encoder's raw P(contradiction) - not the ordinal support scale -
+    # confidently exceeds CONTRADICTION_FLAG_THRESHOLD against the student's own
+    # documentation. Applied as a fixed logit-space penalty, not blended into
+    # the continuous terms; see config.CONTRADICTION_FLAG_PENALTY.
+    contradiction_flag: bool = Field(False, description="True if the cross-encoder confidently flagged this response as contradicting the student's own documentation")
 
     # State and routing
     state: StudentState = Field(..., description="Evaluated state of the student's reasoning")
@@ -111,6 +117,14 @@ class ProbeTurn(BaseModel):
     # Both are None when no draft was generated (nothing to compare against).
     advocate_draft: Optional[str] = Field(None, description="Raw Advocate-generated suggestion text offered for this turn, if one was generated")
     advocate_similarity: Optional[float] = Field(None, ge=0.0, le=1.0, description="difflib similarity ratio between the submitted response and the Advocate draft; 1.0 = submitted verbatim, 0.0 = unrecognisable from the draft")
+    # Distinct from response_source == ADVOCATE, which also covers a human
+    # submitting an in-session suggestion verbatim. This flags turns where no
+    # human was involved at all: the autonomous pre-viva phase where the Advocate
+    # answers its own probes until a claim genuinely collapses. Excluded from the
+    # graded composite/rubric means so a student is only ever scored on their own
+    # turns, and defaults False so every transcript recorded before this feature
+    # existed is unaffected.
+    autonomous_preflight: bool = Field(False, description="True if this turn was generated and answered entirely by the on-device Advocate before the human took over, not by the student")
 
 class FacultyLabel(BaseModel):
     turn_id: str = Field(..., description="The unique turn ID being labelled")
