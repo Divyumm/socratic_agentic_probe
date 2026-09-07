@@ -83,8 +83,6 @@ class Teleprompter:
         if claim:
             if state == StudentState.COLLAPSED:
                 prefix += "Let's look at this from a new angle. "
-            elif state == StudentState.UNSTABLE:
-                prefix += "I'd like to explore the foundations of that a bit more. "
                 
         # Combine the surfacing prefix with the cleansed raw prompt
         text = f"{prefix}{text}"

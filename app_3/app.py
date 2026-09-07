@@ -608,11 +608,7 @@ else:
                     st.markdown(f"""
                     <div class="glass-card" style="text-align: center;">
                         <div class="metric-value">{last_turn.coherence_score:.2f}</div>
-                        <div class="metric-label">Evaluator NLI</div>
-                    </div>
-                    <div class="glass-card" style="text-align: center;">
-                        <div class="metric-value">{last_turn.circularity_score:.2f}</div>
-                        <div class="metric-label">Auditor NLI</div>
+                        <div class="metric-label">Coherence</div>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -620,14 +616,9 @@ else:
                     st.markdown(f"""
                     <div class="glass-card" style="text-align: center;">
                         <div class="metric-value">{last_turn.grounding_score:.2f}</div>
-                        <div class="metric-label">Advocate NLI</div>
-                    </div>
-                    <div class="glass-card" style="text-align: center;">
-                        <div class="metric-value">{last_turn.variance_score:.2f}</div>
-                        <div class="metric-label">Variance (MC)</div>
+                        <div class="metric-label">Grounding</div>
                     </div>
                     """, unsafe_allow_html=True)
-
 
 
                 # Composite Confidence Score gauge
