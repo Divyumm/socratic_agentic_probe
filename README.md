@@ -16,6 +16,8 @@ To run this on your own machine, first clone the repository and install the requ
 ```bash
 git clone https://github.com/Divyumm/socratic_agentic_probe.git
 cd socratic_agentic_probe
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows, use: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 *(Note: The first time you run the application, it will automatically download the `Qwen2.5-0.5B-Instruct` and `cross-encoder/nli-deberta-v3-small` models to your local Hugging Face cache. This may take a few minutes depending on your internet connection).*
