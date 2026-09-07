@@ -56,8 +56,12 @@ class NLIAuditor:
     def __new__(cls):
         # Singleton pattern to prevent reloading the model in memory multiple times
         if cls._instance is None:
-            cls._instance = super(NLIAuditor, cls).__new__(cls)
-            cls._instance._initialize()
+            instance = super(NLIAuditor, cls).__new__(cls)
+            try:
+                instance._initialize()
+                cls._instance = instance
+            except Exception:
+                raise
         return cls._instance
 
     def _initialize(self):
