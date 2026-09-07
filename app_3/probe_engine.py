@@ -47,7 +47,6 @@ class ProbingSessionManager:
         self.session_state = StudentState.GROUNDED
         
         # Layer 2 Rubric Store
-        self.rubric_scores = []
         self.challenges: List[ChallengeRecord] = []
         from app_3.config import SCORING_VERSION
         self.weight_version = SCORING_VERSION
@@ -409,51 +408,6 @@ class ProbingSessionManager:
         self.turns.append(turn)
         self.session_state = state
 
-        # Successive longitudinal AI rubric scoring on claim resolution
-        from app_3.config import VIVA_ENABLE_LAYER_2
-        if VIVA_ENABLE_LAYER_2 and state in (StudentState.GROUNDED, StudentState.COLLAPSED):
-            claim_turns = [t for t in self.turns if t.claim_id == current_claim_id]
-            rubric_res = self.llm_client.evaluate_claim_rubric(current_claim_text, claim_turns)
-
-            from app_3.schemas import RubricScore, RubricConstruct
-            rubric_scores = [
-                RubricScore(
-                    claim_id=current_claim_id,
-                    rubric_construct=RubricConstruct.INTERNALISATION,
-                    bucket="A",
-                    score=rubric_res.internalisation_score,
-                    anchor_level=rubric_res.internalisation_anchor,
-                    source="auto"
-                ),
-                RubricScore(
-                    claim_id=current_claim_id,
-                    rubric_construct=RubricConstruct.ORIGINALITY,
-                    bucket="A",
-                    score=rubric_res.originality_score,
-                    anchor_level=rubric_res.originality_anchor,
-                    source="auto"
-                ),
-                RubricScore(
-                    claim_id=current_claim_id,
-                    rubric_construct=RubricConstruct.CONFIDENCE_CONVICTION,
-                    bucket="B",
-                    score=rubric_res.confidence_score,
-                    anchor_level=rubric_res.confidence_anchor,
-                    source="auto-draft"
-                ),
-                RubricScore(
-                    claim_id=current_claim_id,
-                    rubric_construct=RubricConstruct.EMPATHY,
-                    bucket="B",
-                    score=rubric_res.empathy_score,
-                    anchor_level=rubric_res.empathy_anchor,
-                    source="auto-draft"
-                )
-            ]
-            self.rubric_scores.extend(rubric_scores)
-            # Attach per-turn rubric scores for display in UI
-            turn.rubric_scores = rubric_scores
-
         # Translate next_prompt using Teleprompter for student view
         if state == StudentState.PAUSED or "SESSION RESOLVED" in next_prompt:
             return turn, next_prompt
@@ -660,7 +614,6 @@ class ProbingSessionManager:
                 composite_confidence=round(avg_confidence, 2),
                 version_a_composite=v_a_composite,
                 version_b_composite=v_b_composite,
-                rubric_scores=self.rubric_scores,
                 session_notes=notes
             )
             

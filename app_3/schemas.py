@@ -111,7 +111,6 @@ class ProbeTurn(BaseModel):
     # Both are None when no draft was generated (nothing to compare against).
     advocate_draft: Optional[str] = Field(None, description="Raw Advocate-generated suggestion text offered for this turn, if one was generated")
     advocate_similarity: Optional[float] = Field(None, ge=0.0, le=1.0, description="difflib similarity ratio between the submitted response and the Advocate draft; 1.0 = submitted verbatim, 0.0 = unrecognisable from the draft")
-    rubric_scores: List['RubricScore'] = Field(default_factory=list, description="Per-turn qualitative rubric scores (empathy, internalisation, confidence)")
 
 class FacultyLabel(BaseModel):
     turn_id: str = Field(..., description="The unique turn ID being labelled")
@@ -124,25 +123,7 @@ class FacultyLabel(BaseModel):
 class FacultyRubricLabel(BaseModel):
     claim_id: str = Field(..., description="The unique claim ID being evaluated")
     labeller_id: str = Field(..., description="ID of the faculty labeller")
-    internalisation_anchor: str = Field(..., description="Faculty label for Internalisation (Low/Mid/High)")
-    originality_anchor: str = Field(..., description="Faculty label for Originality (Low/Mid/High)")
-    confidence_anchor: str = Field(..., description="Faculty label for Confidence (Low/Mid/High)")
-    empathy_anchor: str = Field(..., description="Faculty label for Empathy (Low/Mid/High)")
     labelled_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="ISO timestamp")
-
-class RubricConstruct(str, Enum):
-    INTERNALISATION = "Internalisation"
-    ORIGINALITY = "Originality"
-    CONFIDENCE_CONVICTION = "Confidence_Conviction"
-    EMPATHY = "Empathy"
-
-class RubricScore(BaseModel):
-    claim_id: str = Field(..., description="The ID of the Claim being scored")
-    rubric_construct: RubricConstruct = Field(..., validation_alias=AliasChoices('construct', 'rubric_construct'), description="The qualitative rubric construct")
-    bucket: str = Field(..., description="The bucket category ('A', 'B', or 'C')")
-    score: float = Field(..., ge=0.0, le=1.0, description="Score value between 0.0 and 1.0")
-    anchor_level: str = Field(..., description="Qualitative level descriptive label (e.g. 'Low', 'Mid', 'High')")
-    source: str = Field(..., description="Scoring source (e.g., 'auto', 'human', 'auto-draft')")
 
 class ReviewCard(BaseModel):
     composite_confidence: float = Field(..., ge=0.0, le=1.0, description="The primary structural composite confidence score used in the session")

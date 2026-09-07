@@ -426,19 +426,7 @@ else:
                 source_emoji = "🧑" if turn.response_source.value == "Student" else "🤖" if turn.response_source.value == "Advocate" else "🔀"
                 st.markdown(f'<div class="chat-bubble student-bubble"><b>Student:</b> {html.escape(turn.student_response)} <small>[{source_emoji} {turn.response_source.value}]</small></div>', unsafe_allow_html=True)
 
-            # Debug mode: show rubric score badges
-            if st.session_state.debug_mode and turn.rubric_scores:
-                with col_resp_badges:
-                    for score in turn.rubric_scores:
-                        # Show badge if above threshold (0.65 = "good" level)
-                        construct_name = score.rubric_construct.value.replace("_", " ")
-                        if score.score >= 0.65:
-                            if "Empathy" in construct_name:
-                                st.success(f"✓ {construct_name.split()[0]} ({score.score:.2f})")
-                            elif "Internalisation" in construct_name:
-                                st.success(f"✓ {construct_name.split()[0]} ({score.score:.2f})")
-                            elif "Confidence" in construct_name:
-                                st.success(f"✓ Conviction ({score.score:.2f})")
+
 
             if turn.reconstruction_dimension:
                 masked_recon = html.escape(manager.teleprompter.DIMENSION_MASK_MAP.get(turn.reconstruction_dimension, turn.reconstruction_dimension.value))

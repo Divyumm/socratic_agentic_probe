@@ -50,16 +50,6 @@ class PortfolioAuditRun(BaseModel):
     rationale: str = Field(..., description="One or two sentences justifying the score, for faculty review")
 
 
-class ClaimRubricEvaluation(BaseModel):
-    internalisation_score: float = Field(..., description="Score for Internalisation (0.0 to 1.0) based on coding manual anchors")
-    internalisation_anchor: str = Field(..., description="Anchor level label for Internalisation ('Low', 'Mid', 'High')")
-    originality_score: float = Field(..., description="Score for Originality (0.0 to 1.0) based on coding manual anchors")
-    originality_anchor: str = Field(..., description="Anchor level label for Originality ('Low', 'Mid', 'High')")
-    confidence_score: float = Field(..., description="Score for Confidence & Conviction (0.0 to 1.0) based on coding manual anchors")
-    confidence_anchor: str = Field(..., description="Anchor level label for Confidence & Conviction ('Low', 'Mid', 'High')")
-    empathy_score: float = Field(..., description="Score for Empathy & Stakeholder Sensitivity (0.0 to 1.0) based on coding manual anchors")
-    empathy_anchor: str = Field(..., description="Anchor level label for Empathy & Stakeholder Sensitivity ('Low', 'Mid', 'High')")
-
 class LLMClient:
     """Handles interaction with the Anthropic Claude API for structured epistemic claim extraction and evaluation."""
 
@@ -530,116 +520,6 @@ Score the response on the following criteria:
             "state": state
         }
 
-    def evaluate_claim_rubric(self, claim_text: str, claim_turns: List[Any]) -> ClaimRubricEvaluation:
-        """Evaluates localized claim turns longitudinally against Bucket A & B coding manual anchors."""
-        if not claim_turns:
-            return ClaimRubricEvaluation(
-                internalisation_score=0.5, internalisation_anchor="Mid",
-                originality_score=0.5, originality_anchor="Mid",
-                confidence_score=0.5, confidence_anchor="Mid",
-                empathy_score=0.5, empathy_anchor="Mid"
-            )
-            
-        if self.client is None:
-            # Dynamic mock fallback for offline tests based on turn length/keywords
-            import re
-            total_words = sum(len(str(t.student_response).split()) for t in claim_turns)
-            all_text = " ".join(str(t.student_response).lower() for t in claim_turns)
-
-            # Simple heuristic
-            score = min(0.95, 0.4 + (total_words / 150.0))
-            if "we need" in all_text or "users" in all_text or "help" in all_text or "they" in all_text:
-                emp_score = min(0.95, score + 0.2)
-            else:
-                emp_score = score
-
-            # Originality: reward responses that engage the claim's core vocabulary in a
-            # "healthy" middle band, rather than either ignoring the claim (no overlap) or
-            # reciting it near-verbatim (near-total overlap). Mirrors compute_grounding_score's
-            # overlap-band logic, since "originality" here means synthesis, not verbatim copying.
-            def _clean(t: str) -> str:
-                return re.sub(r'[^\w\s]', '', t.lower()).strip()
-
-            claim_kw = set(w for w in _clean(claim_text).split() if len(w) > 4)
-            response_kw = set(w for w in _clean(all_text).split() if len(w) > 4)
-            if not claim_kw or not response_kw:
-                orig_score = score
-            else:
-                overlap_ratio = len(claim_kw.intersection(response_kw)) / len(claim_kw)
-                if overlap_ratio == 0:
-                    orig_score = 0.05
-                elif overlap_ratio < 0.1:
-                    orig_score = 0.35
-                elif overlap_ratio <= 0.6:
-                    orig_score = 0.85
-                else:
-                    orig_score = 0.50
-
-            # Confidence & Conviction: firmness of the defense, i.e. absence of hedging
-            # language. Word count says nothing about conviction, so this is judged
-            # independently of the `score` heuristic used for the other constructs.
-            vague_markers = ["i think", "maybe", "not sure", "perhaps", "probably",
-                              "not certain", "unsure", "kind of", "sort of", "i guess"]
-            conf_score = 0.3 if any(m in all_text for m in vague_markers) else 0.8
-
-            anchor = "High" if score >= 0.75 else ("Mid" if score >= 0.5 else "Low")
-            orig_anchor = "High" if orig_score >= 0.75 else ("Mid" if orig_score >= 0.5 else "Low")
-            conf_anchor = "High" if conf_score >= 0.75 else ("Mid" if conf_score >= 0.5 else "Low")
-            emp_anchor = "High" if emp_score >= 0.75 else ("Mid" if emp_score >= 0.5 else "Low")
-
-            return ClaimRubricEvaluation(
-                internalisation_score=round(score, 2),
-                internalisation_anchor=anchor,
-                originality_score=round(orig_score, 2),
-                originality_anchor=orig_anchor,
-                confidence_score=round(conf_score, 2),
-                confidence_anchor=conf_anchor,
-                empathy_score=round(emp_score, 2),
-                empathy_anchor=emp_anchor
-            )
-
-        history_str = ""
-        for idx, t in enumerate(claim_turns):
-            history_str += f"Turn {idx+1}:\n"
-            history_str += f"  Question: {t.question}\n"
-            history_str += f"  Response: {t.student_response}\n\n"
-
-        prompt = f"""
-You are an expert design assessor grading a student's oral viva defense.
-Evaluate the student's defense for the following claim:
-Claim Text: "{claim_text}"
-
-Dialogue History:
-{history_str}
-
-Evaluate the student's responses longitudinally across these turns against the four coding manual rubric constructs:
-1. Internalisation: Conceptual mastery in plain first-person language rather than verbatim textbook copying.
-2. Originality: Adding original reasons, synthesis, or trade-offs rather than copying the claim text word-for-word.
-3. Confidence & Conviction: Firmness and clarity of defense without waffling ("maybe", "perhaps").
-4. Empathy & Stakeholder Sensitivity: Designing around core user needs and maintaining an inclusive, user-centric perspective.
-
-Return a JSON object conforming exactly to the response schema. Set the score (0.0 to 1.0) and descriptive anchor levels ("Low", "Mid", "High") for each construct.
-"""
-        try:
-            resp = self.client.messages.parse(
-                model=EVALUATOR_MODEL,
-                max_tokens=1024,
-                temperature=_clamp_temp(0.2),
-                messages=[{"role": "user", "content": prompt}],
-                output_format=ClaimRubricEvaluation,
-            )
-            return resp.parsed_output
-        except anthropic.RateLimitError as e:
-            print(f"Claude API rate limit/quota exceeded during rubric evaluation: {e}. Using heuristics.")
-        except Exception as e:
-            print(f"Claude longitudinal evaluation failed: {e}. Using heuristics.")
-
-        # Trigger fallback with client None mock bypass
-        old_client = self.client
-        self.client = None
-        res = self.evaluate_claim_rubric(claim_text, claim_turns)
-        self.client = old_client
-        return res
 
     def _evaluate_response_mock(self, question: str, response: str) -> Dict[str, Any]:
         """Local mock evaluator fallback for offline execution."""
