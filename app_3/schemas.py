@@ -129,7 +129,6 @@ class ReviewCard(BaseModel):
     composite_confidence: float = Field(..., ge=0.0, le=1.0, description="The primary structural composite confidence score used in the session")
     version_a_composite: Optional[float] = Field(None, ge=0.0, le=1.0, description="Version A (Heuristics) composite confidence score")
     version_b_composite: Optional[float] = Field(None, ge=0.0, le=1.0, description="Version B (ML model) composite confidence score")
-    rubric_scores: List[RubricScore] = Field(default_factory=list, description="Qualitative rubric scores")
     session_notes: Optional[str] = Field(None, description="Qualitative feedback comments")
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="ISO timestamp")
 
